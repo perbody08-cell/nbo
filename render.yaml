@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: noty-sms-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # Укажи в dashboard Render
+      - key: ADMIN_IDS
+        sync: false  # Укажи в dashboard Render
+      - key: AI_PROVIDER
+        value: groq
+      - key: AI_API_KEY
+        sync: false  # Укажи в dashboard Render
+    healthCheckPath: /health

@@ -1,0 +1,1058 @@
+import asyncio
+import os
+import re
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
+from aiogram.filters import CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+
+from config import TOKEN, WORKERS, ADMINS
+from states import OrderState, AdminState
+from db import (
+    init_db,
+    upsert_user,
+    is_worker,
+    create_order,
+    get_order,
+    take_order,
+    set_code_request_msg_id,
+    set_worker_msg_id,
+    get_user_active_order,
+    get_user_orders_active,
+    get_user_orders_past,
+    count_user_orders,
+    save_code,
+    get_code_count,
+    accept_order,
+    reject_order,
+    increment_reject_count,
+    get_worker_services,
+    get_workers_for_service,
+    get_service_price,
+    get_user_balance,
+    add_user_balance,
+    get_worker_price,
+    create_withdrawal,
+    get_queue_count,
+    get_queue_position,
+    get_admin_contacts,
+    get_main_services,
+    get_other_services,
+    get_username_by_id,
+    get_user_withdrawals,
+    get_user_limit,
+    increment_user_limit,
+    get_available_orders,
+    get_user_stats,
+    get_worker_stats,
+)
+import admin as admin_module
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+dp.include_router(admin_module.router)
+
+
+_active_timers: set = set()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  DESIGN SYSTEM — Единый стиль всех кнопок
+# ═══════════════════════════════════════════════════════════════════════════
+
+class Style:
+    """Цветовая палитра и эмодзи дизайн-системы"""
+    PRIMARY   = "\U0001f535"   # Главные действия
+    SUCCESS   = "\U0001f7e2"   # Успех, принять
+    DANGER    = "\U0001f534"   # Опасность, отклонить
+    WARNING   = "\U0001f7e1"   # Предупреждения
+    INFO      = "\U0001f537"   # Информация
+    MONEY     = "\U0001f4b0"   # Финансы
+    USER      = "\U0001f464"   # Пользователь
+    WORKER    = "\U0001f477"   # Скуп
+    ADMIN     = "\U0001f451"   # Админ
+    PHONE     = "\U0001f4f1"   # Номер
+    CODE      = "\U0001f511"   # Код
+    ORDER     = "\U0001f4cb"   # Заявка
+    QUEUE     = "\U0001f4ca"   # Очередь
+    BACK      = "\U000025c0\U0000fe0f"   # Назад
+    HOME      = "\U0001f3e0"   # Главная
+    SUPPORT   = "\U0001f198"   # Поддержка
+    PROFILE   = "\U0001f464"   # Профиль
+    WITHDRAW  = "\U0001f4b8"   # Вывод
+    ACTIVE    = "\U0001f4cb"   # Активные
+    HISTORY   = "\U0001f550"   # История
+    SETTINGS  = "\U00002699\U0000fe0f"   # Настройки
+    ADD       = "\U00002795"   # Добавить
+    REMOVE    = "\U0001f5d1\U0000fe0f"  # Удалить
+    EDIT      = "\U0000270f\U0000fe0f"   # Изменить
+    SEARCH    = "\U0001f50d"   # Поиск
+    BONUS     = "\U0001f381"   # Бонус
+    PRICE     = "\U0001f3f7\U0000fe0f"   # Цена
+    BALANCE   = "\U0001f4b3"   # Баланс
+    SERVICES  = "\U0001f9e9"   # Сервисы
+    STATS     = "\U0001f4c8"   # Статистика
+    STAR      = "\U00002b50"   # Звезда
+    ARROW_R   = "\U000025b6\U0000fe0f"   # Вперёд
+    ARROW_L   = "\U000025c0\U0000fe0f"   # Назад
+    CHECK     = "\U00002705"   # Галочка
+    CROSS     = "\U0000274c"   # Крестик
+    REFRESH   = "\U0001f504"   # Обновить
+    BELL      = "\U0001f514"   # Уведомление
+    CLOCK     = "\U000023f0"   # Время
+    CHAT      = "\U0001f4ac"   # Комментарий
+    DOC       = "\U0001f4c4"   # Документ
+    PIN       = "\U0001f4cc"   # Закрепить
+    FIRE      = "\U0001f525"   # Горячее
+    CROWN     = "\U0001f451"   # Корона
+    GEM       = "\U0001f48e"   # Алмаз
+
+
+# ─── Reply Keyboards ──────────────────────────────────────────────────────
+
+def main_menu_kb() -> ReplyKeyboardMarkup:
+    """Главное меню пользователя"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text=f"{Style.PHONE} Сдать номер"),
+                KeyboardButton(text=f"{Style.SUPPORT} Поддержка"),
+            ],
+            [
+                KeyboardButton(text=f"{Style.ACTIVE} Активные заявки"),
+                KeyboardButton(text=f"{Style.HISTORY} Прошлые заявки"),
+            ],
+            [
+                KeyboardButton(text=f"{Style.PROFILE} Профиль"),
+                KeyboardButton(text=f"{Style.WITHDRAW} Выплата"),
+            ],
+            [
+                KeyboardButton(text=f"{Style.BALANCE} Мои заявки на вывод"),
+            ],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие...",
+    )
+
+
+def worker_menu_kb() -> ReplyKeyboardMarkup:
+    """Меню скупа (воркера)"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=f"{Style.QUEUE} Очередь заявок")],
+            [KeyboardButton(text=f"{Style.PROFILE} Профиль")],
+            [KeyboardButton(text=f"{Style.MONEY} Баланс")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие...",
+    )
+
+
+def admin_start_kb() -> ReplyKeyboardMarkup:
+    """Клавиатура админа при старте"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=f"{Style.ADMIN} Админ-панель")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+# ─── Inline Keyboards ─────────────────────────────────────────────────────
+
+def back_kb(callback_data: str = "back_to_services") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data=callback_data)]
+        ]
+    )
+
+
+def service_selected_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{Style.BACK} Изменить сервис", callback_data="back_to_services"
+                )
+            ]
+        ]
+    )
+
+
+def take_order_kb(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{Style.CHECK} Взять заявку", callback_data=f"take_{order_id}"
+                )
+            ]
+        ]
+    )
+
+
+def worker_action_kb(order_id: int) -> InlineKeyboardMarkup:
+    """Кнопки для скупа: принять/запросить повтор"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{Style.SUCCESS} Принять", callback_data=f"accept_{order_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"{Style.WARNING} Запросить повтор", callback_data=f"reject_{order_id}"
+                ),
+            ]
+        ]
+    )
+
+
+# ─── Helpers ────────────────────────────────────────────────────────────────
+
+def not_admin(message: Message) -> bool:
+    return message.from_user.id not in ADMINS
+
+
+RUSSIAN_PHONE_RE = re.compile(r"^\+?7\d{10}$")
+CODE_RE = re.compile(r"^\d+$")
+
+STATUS_LABELS = {
+    "waiting":  f"{Style.CLOCK} Ожидает скупа",
+    "active":   f"{Style.REFRESH} В работе",
+    "accepted": f"{Style.SUCCESS} Принята",
+    "rejected": f"{Style.DANGER} Отклонена",
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SERVICE SELECTION KEYBOARDS
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def build_services_kb() -> InlineKeyboardMarkup:
+    rows = []
+    main_services = await get_main_services()
+    if not main_services:
+        main_services = []
+    for service in main_services:
+        price = await get_service_price(service)
+        label = f"{Style.STAR} {service} — {price} $"
+        rows.append(
+            [InlineKeyboardButton(text=label, callback_data=f"service_{service}")]
+        )
+    other_svcs = await get_other_services()
+    if other_svcs:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{Style.ARROW_R} Другие сервисы", callback_data="service_Другие сервисы"
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def build_other_services_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for service in await get_other_services():
+        price = await get_service_price(service)
+        label = f"{Style.INFO} {service} — {price} $"
+        rows.append(
+            [InlineKeyboardButton(text=label, callback_data=f"oservice_{service}")]
+        )
+    rows.append(
+        [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="back_to_services")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  START COMMAND
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dp.message(CommandStart())
+async def start(message: Message, state: FSMContext):
+    await upsert_user(message.from_user.id, message.from_user.username)
+    await state.clear()
+
+    if message.from_user.id in ADMINS:
+        await message.answer(
+            f"{Style.CROWN} <b>Добро пожаловать, Администратор!</b>\n\n"
+            f"Используйте /admin для открытия панели управления.",
+            reply_markup=admin_start_kb(),
+            parse_mode="HTML",
+        )
+        return
+
+    if await is_worker(message.from_user.id):
+        services = await get_worker_services(message.from_user.id)
+        if services:
+            await message.answer(
+                f"{Style.WORKER} <b>Вы вошли как скуп</b>\n\n"
+                f"{Style.SERVICES} Ваши сервисы: <code>{', '.join(services)}</code>\n\n"
+                f"{Style.BELL} Ожидайте новых заявок — они будут приходить сюда автоматически.",
+                reply_markup=worker_menu_kb(),
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                f"{Style.WORKER} <b>Вы вошли как скуп</b>\n\n"
+                f"{Style.WARNING} Вам пока не назначен ни один сервис.\n"
+                f"{Style.SUPPORT} Обратитесь к администратору.",
+                reply_markup=worker_menu_kb(),
+                parse_mode="HTML",
+            )
+        return
+
+    balance = await get_user_balance(message.from_user.id)
+    # Отправляем аватарку бота с приветствием
+    from aiogram.types import FSInputFile
+    avatar = FSInputFile("bot_avatar.jpg")
+    await message.answer_photo(
+        photo=avatar,
+        caption=
+        f"{Style.GEM} <b>Добро пожаловать в Noty SMS!</b>\n\n"
+        f"{Style.MONEY} Ваш баланс: <code>{balance} $</code>\n"
+        f"{Style.INFO} Work Empire — надёжный скуп номеров\n\n"
+        f"Выберите нужный раздел в меню ниже.",
+        reply_markup=main_menu_kb(),
+        parse_mode="HTML",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WORKER MENU
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dp.message(F.text.contains("Очередь заявок"))
+async def worker_queue(message: Message, state: FSMContext):
+    await state.clear()
+    if not await is_worker(message.from_user.id):
+        await message.answer(f"{Style.CROSS} Нет доступа", reply_markup=main_menu_kb())
+        return
+
+    orders = await get_available_orders(message.from_user.id)
+    if not orders:
+        await message.answer(
+            f"{Style.QUEUE} Очередь пуста. Новые заявки приходят автоматически.",
+            reply_markup=worker_menu_kb(),
+        )
+        return
+
+    for oid, uid, svc, number in orders:
+        await message.answer(
+            f"{Style.ORDER} <b>#{oid}</b> | {Style.PHONE} {svc} | <code>{number}</code>",
+            reply_markup=take_order_kb(oid),
+            parse_mode="HTML",
+        )
+    await message.answer(
+        f"{Style.INFO} Всего: <b>{len(orders)}</b> заявок.",
+        reply_markup=worker_menu_kb(),
+        parse_mode="HTML",
+    )
+
+
+@dp.message(F.text.contains("Баланс"))
+async def worker_balance(message: Message, state: FSMContext):
+    await state.clear()
+    if not await is_worker(message.from_user.id):
+        await message.answer(f"{Style.CROSS} Нет доступа", reply_markup=main_menu_kb())
+        return
+    bal = await get_user_balance(message.from_user.id)
+    await message.answer(
+        f"{Style.MONEY} <b>Баланс:</b> <code>{bal} $</code>",
+        reply_markup=worker_menu_kb(),
+        parse_mode="HTML",
+    )
+
+
+@dp.message(F.text.contains("Профиль"))
+async def profile_menu(message: Message, state: FSMContext):
+    await state.clear()
+    uid = message.from_user.id
+    username = await get_username_by_id(uid)
+    user_label = f"@{username}" if username else str(uid)
+    balance = await get_user_balance(uid)
+
+    if await is_worker(uid):
+        stats = await get_worker_stats(uid)
+        text = (
+            f"{Style.WORKER} <b>Профиль скупа</b>\n\n"
+            f"{Style.USER} Юзернейм: <code>{user_label}</code>\n"
+            f"{Style.MONEY} Баланс: <code>{balance} $</code>\n\n"
+            f"{Style.STATS} <b>Статистика:</b>\n"
+            f"  {Style.CHECK} Принято за всё время: <b>{stats['total_accepted']}</b>\n"
+            f"  {Style.FIRE} За сегодня: <b>{stats['today']}</b>"
+        )
+        await message.answer(text, reply_markup=worker_menu_kb(), parse_mode="HTML")
+    else:
+        stats = await get_user_stats(uid)
+        limit = await get_user_limit(uid)
+        text = (
+            f"{Style.USER} <b>Профиль</b>\n\n"
+            f"{Style.USER} Юзернейм: <code>{user_label}</code>\n"
+            f"{Style.MONEY} Баланс: <code>{balance} $</code>\n"
+            f"{Style.PIN} Лимит заявок: <b>{limit}</b>\n\n"
+            f"{Style.STATS} <b>Статистика заявок:</b>\n"
+            f"  {Style.ORDER} Всего создано: <b>{stats['total']}</b>\n"
+            f"  {Style.ACTIVE} Активных: <b>{stats['active']}</b>\n"
+            f"  {Style.SUCCESS} Принятых: <b>{stats['accepted']}</b>\n"
+            f"  {Style.FIRE} Зачислено сегодня: <b>{stats['today']}</b>"
+        )
+        await message.answer(text, reply_markup=main_menu_kb(), parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WITHDRAWAL
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dp.message(F.text.contains("Выплата"))
+async def withdrawal_start(message: Message, state: FSMContext):
+    await state.clear()
+    balance = await get_user_balance(message.from_user.id)
+    if balance <= 0:
+        await message.answer(
+            f"{Style.CROSS} На вашем балансе недостаточно средств для вывода.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+    await state.set_state(AdminState.entering_withdrawal_details)
+    await state.update_data(withdrawal_amount=balance)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.CROSS} Отмена", callback_data="cancel_withdrawal")]
+        ]
+    )
+    await message.answer(
+        f"{Style.WITHDRAW} <b>Заявка на вывод</b>\n\n"
+        f"{Style.MONEY} Доступно: <code>{balance} $</code>\n"
+        f"{Style.DOC} Введите реквизиты для вывода:",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "cancel_withdrawal")
+async def cancel_withdrawal(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(f"{Style.CROSS} Вывод отменён.")
+    await callback.answer()
+
+
+@dp.message(AdminState.entering_withdrawal_details)
+async def withdrawal_input(message: Message, state: FSMContext):
+    details = message.text.strip()
+    if not details:
+        await message.answer(f"{Style.CROSS} Введите реквизиты для вывода.")
+        return
+    data = await state.get_data()
+    amount = data.get("withdrawal_amount", 0)
+    await add_user_balance(message.from_user.id, -amount)
+    await create_withdrawal(message.from_user.id, amount, details)
+    username = await get_username_by_id(message.from_user.id)
+    user_label = f"@{username}" if username else str(message.from_user.id)
+    for admin_id in ADMINS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"{Style.WITHDRAW} <b>Новая заявка на выплату</b>\n\n"
+                f"{Style.USER} Пользователь: <code>{user_label}</code>\n"
+                f"{Style.MONEY} Сумма: <code>{amount} $</code>\n"
+                f"{Style.DOC} Реквизиты: <code>{details}</code>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+    await state.clear()
+    await message.answer(
+        f"{Style.CHECK} Заявка на выплату отправлена администратору.",
+        reply_markup=main_menu_kb(),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MAIN MENU BUTTONS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dp.message(F.text.contains("Сдать номер"))
+async def submit_number_menu(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(OrderState.choosing_service)
+    kb = await build_services_kb()
+    sent = await message.answer(
+        f"{Style.SERVICES} <b>Выберите сервис:</b>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await state.update_data(service_msg_id=sent.message_id)
+
+
+@dp.message(F.text.contains("Поддержка"))
+async def support_menu(message: Message, state: FSMContext):
+    await state.clear()
+    contacts = await get_admin_contacts(list(ADMINS))
+    if contacts:
+        contact_str = "\n".join(contacts)
+        text = (
+            f"{Style.SUPPORT} <b>Поддержка</b>\n\n"
+            f"{Style.INFO} По всем вопросам обращайтесь к администратору:\n"
+            f"<code>{contact_str}</code>"
+        )
+    else:
+        text = (
+            f"{Style.SUPPORT} <b>Поддержка</b>\n\n"
+            f"{Style.INFO} По всем вопросам обращайтесь к администратору."
+        )
+    await message.answer(text, reply_markup=main_menu_kb(), parse_mode="HTML")
+
+
+@dp.message(F.text.contains("Активные заявки"))
+async def active_orders_menu(message: Message, state: FSMContext):
+    await state.clear()
+    orders = await get_user_orders_active(message.from_user.id)
+    if not orders:
+        await message.answer(
+            f"{Style.INFO} У вас нет активных заявок.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+    lines = [f"{Style.ACTIVE} <b>Активные заявки:</b>\n"]
+    for oid, service, number, status in orders:
+        label = STATUS_LABELS.get(status, status)
+        lines.append(
+            f"{Style.ORDER} <b>#{oid}</b> | {Style.PHONE} {service} | <code>{number}</code>\n"
+            f"   {label}"
+        )
+    await message.answer("\n".join(lines), reply_markup=main_menu_kb(), parse_mode="HTML")
+
+
+@dp.message(F.text.contains("Прошлые заявки"))
+async def past_orders_menu(message: Message, state: FSMContext):
+    await state.clear()
+    orders = await get_user_orders_past(message.from_user.id)
+    if not orders:
+        await message.answer(
+            f"{Style.INFO} У вас нет завершённых заявок.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+    lines = [f"{Style.HISTORY} <b>Прошлые заявки:</b>\n"]
+    for oid, service, number, status in orders:
+        label = STATUS_LABELS.get(status, status)
+        lines.append(
+            f"{Style.ORDER} <b>#{oid}</b> | {Style.PHONE} {service} | <code>{number}</code>\n"
+            f"   {label}"
+        )
+    await message.answer("\n".join(lines), reply_markup=main_menu_kb(), parse_mode="HTML")
+
+
+@dp.message(F.text.contains("Мои заявки на вывод"))
+async def my_withdrawals_menu(message: Message, state: FSMContext):
+    await state.clear()
+    rows = await get_user_withdrawals(message.from_user.id)
+    if not rows:
+        await message.answer(
+            f"{Style.INFO} У вас нет заявок на вывод.",
+            reply_markup=main_menu_kb(),
+        )
+        return
+    lines = [f"{Style.BALANCE} <b>Мои заявки на вывод:</b>\n"]
+    for wid, amount, details, status in rows:
+        status_icon = f"{Style.SUCCESS} Оплачена" if status == 'paid' else f"{Style.CLOCK} В ожидании"
+        lines.append(
+            f"{Style.ORDER} <b>#{wid}</b> | {Style.MONEY} {amount} $ | {Style.DOC} {details}\n"
+            f"   {status_icon}"
+        )
+    await message.answer("\n".join(lines), reply_markup=main_menu_kb(), parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SERVICE SELECTION CALLBACKS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dp.callback_query(F.data.startswith("service_"))
+async def choose_service(callback: CallbackQuery, state: FSMContext):
+    service = callback.data.split("_", 1)[1]
+    if service == "Другие сервисы":
+        kb = await build_other_services_kb()
+        await callback.message.edit_text(
+            f"{Style.SERVICES} <b>Выберите сервис из категории «Другие»:</b>",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        await state.set_state(OrderState.choosing_other_service)
+        await callback.answer()
+        return
+    price = await get_service_price(service)
+    await state.update_data(service=service)
+    await state.set_state(OrderState.entering_number)
+    bonus_line = f"{Style.BONUS} Бонус при выполнении: <code>{price} $</code>\n\n"
+    await callback.message.edit_text(
+        f"{Style.CHECK} <b>Выбран сервис:</b> <code>{service}</code>\n"
+        f"{bonus_line}"
+        f"{Style.PHONE} Введите игровой номер в формате <code>79121231212</code>:",
+        reply_markup=service_selected_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("oservice_"))
+async def choose_other_service(callback: CallbackQuery, state: FSMContext):
+    service = callback.data[9:]
+    price = await get_service_price(service)
+    await state.update_data(service=service)
+    await state.set_state(OrderState.entering_number)
+    bonus_line = f"{Style.BONUS} Бонус при выполнении: <code>{price} $</code>\n\n"
+    await callback.message.edit_text(
+        f"{Style.CHECK} <b>Выбран сервис:</b> <code>{service}</code>\n"
+        f"{bonus_line}"
+        f"{Style.PHONE} Введите игровой номер в формате <code>79121231212</code>:",
+        reply_markup=service_selected_kb(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_to_services")
+async def back_to_services(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(OrderState.choosing_service)
+    await state.update_data(service=None)
+    kb = await build_services_kb()
+    await callback.message.edit_text(
+        f"{Style.SERVICES} <b>Выберите сервис:</b>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  NUMBER ENTRY
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dp.message(OrderState.entering_number)
+async def enter_number(message: Message, state: FSMContext):
+    raw_lines = [line.strip() for line in message.text.strip().split("\n") if line.strip()]
+    if not raw_lines:
+        await message.answer(f"{Style.CROSS} Введите хотя бы один номер.")
+        return
+
+    valid_numbers = []
+    invalid_numbers = []
+    for number in raw_lines:
+        if RUSSIAN_PHONE_RE.match(number):
+            valid_numbers.append(number)
+        else:
+            invalid_numbers.append(number)
+
+    if invalid_numbers:
+        await message.answer(
+            f"{Style.CROSS} <b>Неверный формат номеров:</b>\n"
+            f"<code>{chr(10).join(invalid_numbers)}</code>\n\n"
+            f"{Style.INFO} Правильный формат:\n"
+            f"<code>79121231212</code> или <code>+79121231212</code>"
+        )
+        return
+
+    data = await state.get_data()
+    service = data["service"]
+
+    user_limit = await get_user_limit(message.from_user.id)
+    total = await count_user_orders(message.from_user.id)
+    remaining = user_limit - total
+    if remaining <= 0:
+        user_kb = worker_menu_kb() if await is_worker(message.from_user.id) else main_menu_kb()
+        await message.answer(
+            f"{Style.CROSS} Вы уже подали максимум <b>{user_limit}</b> заявок.\n"
+            f"{Style.CLOCK} Дождитесь обработки текущих заявок.",
+            reply_markup=user_kb,
+            parse_mode="HTML",
+        )
+        await state.clear()
+        return
+
+    numbers_to_process = valid_numbers[:remaining]
+    created = []
+    for number in numbers_to_process:
+        order_id = await create_order(message.from_user.id, service, number)
+        queue_pos = await get_queue_position(order_id, service)
+        bonus = await get_service_price(service)
+        queue_total = await get_queue_count(service)
+
+        workers_for_service = await get_workers_for_service(service)
+        notified = 0
+        for worker_id in workers_for_service:
+            if await is_worker(worker_id):
+                try:
+                    worker_bonus = await get_worker_price(worker_id, service)
+                    bonus_line = f"{Style.MONEY} Цена для скупа: <code>{worker_bonus or 0} $</code>\n"
+                    await bot.send_message(
+                        worker_id,
+                        f"{Style.BELL} <b>Новая заявка #{order_id}</b>\n\n"
+                        f"{Style.SERVICES} Сервис: <code>{service}</code>\n"
+                        f"{Style.PHONE} Номер: <code>{number}</code>\n"
+                        f"{bonus_line}"
+                        f"{Style.QUEUE} В очереди: <b>{queue_total}</b> номеров",
+                        reply_markup=take_order_kb(order_id),
+                        parse_mode="HTML",
+                    )
+                    notified += 1
+                except Exception:
+                    pass
+
+        created.append((order_id, number, notified))
+
+    lines = [f"{Style.SUCCESS} <b>Заявки созданы:</b>\n"]
+    for order_id, number, notified in created:
+        lines.append(
+            f"{Style.ORDER} <b>#{order_id}</b> | {Style.PHONE} <code>{number}</code> | "
+            f"{Style.WORKER} скупов уведомлено: <b>{notified}</b>"
+        )
+    if len(valid_numbers) > remaining:
+        lines.append(
+            f"\n{Style.WARNING} Создано только <b>{remaining}</b> из <b>{len(valid_numbers)}</b> — "
+            f"лимит <b>{user_limit}</b> заявок."
+        )
+    user_kb = worker_menu_kb() if await is_worker(message.from_user.id) else main_menu_kb()
+    await message.answer("\n".join(lines), reply_markup=user_kb, parse_mode="HTML")
+    await state.clear()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WORKER: TAKE ORDER
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dp.callback_query(F.data.startswith("take_"))
+async def take_order_handler(callback: CallbackQuery):
+    if not await is_worker(callback.from_user.id):
+        await callback.answer(f"{Style.CROSS} Нет доступа")
+        return
+
+    order_id = int(callback.data.split("_", 1)[1])
+    order = await get_order(order_id)
+
+    if not order:
+        await callback.answer(f"{Style.CROSS} Заявка не найдена")
+        return
+
+    if order[5] != "waiting":
+        await callback.answer(f"{Style.WARNING} Уже занято")
+        return
+
+    service = order[2]
+    worker_services = await get_worker_services(callback.from_user.id)
+    if service not in worker_services:
+        await callback.answer(f"{Style.CROSS} У вас нет доступа к сервису {service}")
+        return
+
+    worker_id = callback.from_user.id
+    await take_order(order_id, worker_id)
+
+    # Отправляем пользователю запрос кода
+    code_request = await bot.send_message(
+        order[1],
+        f"{Style.SUCCESS} <b>Ваш номер взят в работу!</b>\n\n"
+        f"{Style.CODE} Отправьте игровой код <b>ответом на это сообщение</b>.\n"
+        f"{Style.WARNING} Только цифры. У вас 2 попытки.",
+        reply_markup=worker_menu_kb() if await is_worker(order[1]) else main_menu_kb(),
+        parse_mode="HTML",
+    )
+    await set_code_request_msg_id(order_id, code_request.message_id)
+
+    number = order[3]
+    service = order[2]
+    await callback.message.edit_text(
+        f"{Style.ORDER} <b>Заявка #{order_id}</b> взята в работу\n\n"
+        f"{Style.SERVICES} Сервис: <code>{service}</code>\n"
+        f"{Style.PHONE} Номер: <code>{number}</code>\n\n"
+        f"{Style.CLOCK} Ожидайте код от пользователя...\n"
+        f"{Style.WARNING} Автоотмена через 2 минуты.",
+        reply_markup=worker_action_kb(order_id),
+        parse_mode="HTML",
+    )
+    await set_worker_msg_id(order_id, callback.message.message_id)
+    await callback.answer(f"{Style.CHECK} Заявка #{order_id} взята!")
+
+    task = asyncio.create_task(auto_cancel_timer(order_id, order[1], worker_id))
+    _active_timers.add(task)
+    task.add_done_callback(_active_timers.discard)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  USER: RECEIVE CODE / COMMENTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dp.message(not_admin, ~StateFilter(AdminState))
+async def catch_all(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    order = await get_user_active_order(user_id)
+
+    if not order:
+        if await is_worker(user_id):
+            await message.answer(
+                f"{Style.INFO} Нет такого варианта ответа",
+                reply_markup=worker_menu_kb(),
+            )
+        else:
+            await message.answer(
+                f"{Style.INFO} Нет такого варианта ответа",
+                reply_markup=main_menu_kb(),
+            )
+        return
+
+    order_id = order[0]
+    service = order[2]
+    number = order[3]
+    worker_id = order[6]
+    code_count = order[7]
+    code_request_msg_id = order[8]
+    worker_msg_id = order[9]
+
+    is_reply_to_code_request = (
+        message.reply_to_message is not None
+        and code_request_msg_id is not None
+        and message.reply_to_message.message_id == code_request_msg_id
+    )
+
+    if not is_reply_to_code_request:
+        try:
+            await bot.send_message(
+                worker_id,
+                f"{Style.CHAT} <b>Комментарий пользователя по заявке #{order_id}:</b>\n"
+                f"<code>{message.text}</code>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        await message.answer(
+            f"{Style.CHAT} Ваше сообщение передано скупу как комментарий.\n"
+            f"{Style.CODE} Чтобы отправить код — ответьте на сообщение с просьбой кода."
+        )
+        return
+
+    if code_count >= 2:
+        await message.answer(
+            f"{Style.CROSS} Вы уже отправили максимум 2 кода по этой заявке.\n"
+            f"{Style.INFO} Дальнейшая отправка кодов невозможна."
+        )
+        return
+
+    code = message.text.strip()
+    if not CODE_RE.match(code):
+        await message.answer(
+            f"{Style.CROSS} Код должен содержать только цифры.\n"
+            f"{Style.CODE} Отправьте ответ на сообщение с просьбой кода ещё раз."
+        )
+        return
+
+    await save_code(order_id, code)
+    new_count = code_count + 1
+
+    attempt_label = (
+        f"{Style.DANGER} последняя попытка" if new_count >= 2 else f"{Style.INFO} попытка {new_count} из 2"
+    )
+
+    try:
+        await bot.send_message(
+            worker_id,
+            f"{Style.CODE} <b>Код от пользователя</b>\n\n"
+            f"{Style.ORDER} Заявка <b>#{order_id}</b>\n"
+            f"{Style.SERVICES} Сервис: <code>{service}</code>\n"
+            f"{Style.PHONE} Номер: <code>{number}</code>\n\n"
+            f"{Style.CODE} Код: <code>{code}</code>\n"
+            f"({attempt_label})",
+            reply_markup=worker_action_kb(order_id),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    await message.answer(
+        f"{Style.CHECK} Код отправлен. {Style.CLOCK} Ожидайте подтверждения.",
+        parse_mode="HTML",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  AUTO-CANCEL TIMER
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def auto_cancel_timer(order_id: int, user_id: int, worker_id: int):
+    await asyncio.sleep(120)
+    order = await get_order(order_id)
+    if order and order[5] == "active":
+        await reject_order(order_id)
+        try:
+            await bot.send_message(
+                user_id,
+                f"{Style.CLOCK} <b>Заявка автоматически отменена</b>\n\n"
+                f"{Style.INFO} Скуп не успел принять код за 2 минуты.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        try:
+            await bot.send_message(
+                worker_id,
+                f"{Style.CLOCK} <b>Заявка #{order_id} автоматически отменена</b>\n"
+                f"{Style.INFO} Истекло время (2 минуты).",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WORKER: ACCEPT / REJECT
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dp.callback_query(F.data.startswith("accept_"))
+async def accept_handler(callback: CallbackQuery):
+    if not await is_worker(callback.from_user.id):
+        await callback.answer(f"{Style.CROSS} Нет доступа")
+        return
+
+    order_id = int(callback.data.split("_", 1)[1])
+    order = await get_order(order_id)
+
+    if not order:
+        await callback.answer(f"{Style.CROSS} Заявка не найдена")
+        return
+
+    await accept_order(order_id)
+    await increment_user_limit(order[1], 3)
+    bonus = await get_service_price(order[2])
+    worker_price = await get_worker_price(callback.from_user.id, order[2]) or 0
+    await add_user_balance(order[1], bonus)
+    if bonus != 0:
+        sign = "+" if bonus > 0 else ""
+        await bot.send_message(
+            order[1],
+            f"{Style.SUCCESS} <b>Ваш номер успешно принят!</b>\n"
+            f"{Style.MONEY} Начислен бонус: <code>{sign}{bonus} $</code>\n"
+            f"{Style.STAR} Лимит заявок увеличен на +3!",
+            parse_mode="HTML",
+        )
+    else:
+        await bot.send_message(
+            order[1],
+            f"{Style.SUCCESS} <b>Ваш номер успешно принят!</b>\n"
+            f"{Style.STAR} Лимит заявок увеличен на +3!",
+            parse_mode="HTML",
+        )
+    if worker_price != 0:
+        await add_user_balance(callback.from_user.id, -worker_price)
+    try:
+        await bot.send_message(
+            callback.from_user.id,
+            f"{Style.BALANCE} Баланс по заявке <b>#{order_id}</b> обновлён.\n"
+            f"{Style.MONEY} Списано: <code>{worker_price} $</code>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    await callback.message.edit_text(
+        f"{Style.SUCCESS} Заявка <b>#{order_id}</b> подтверждена",
+        parse_mode="HTML",
+    )
+    await callback.answer(f"{Style.CHECK} Принято!")
+
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject_handler(callback: CallbackQuery):
+    if not await is_worker(callback.from_user.id):
+        await callback.answer(f"{Style.CROSS} Нет доступа")
+        return
+
+    order_id = int(callback.data.split("_", 1)[1])
+    order = await get_order(order_id)
+
+    if not order:
+        await callback.answer(f"{Style.CROSS} Заявка не найдена")
+        return
+
+    if order[5] != "active":
+        await callback.answer(f"{Style.WARNING} Заявка уже не активна")
+        return
+
+    reject_count = await increment_reject_count(order_id)
+    user_id = order[1]
+    number = order[3]
+    service = order[2]
+
+    if reject_count >= 2:
+        await reject_order(order_id)
+        await bot.send_message(
+            user_id,
+            f"{Style.CROSS} <b>Заявка отменена</b>\n\n"
+            f"{Style.INFO} Исчерпаны все попытки отправки кода.",
+            parse_mode="HTML",
+        )
+        await callback.message.edit_text(
+            f"{Style.CROSS} Заявка <b>#{order_id}</b> отменена — попытки исчерпаны",
+            parse_mode="HTML",
+        )
+    else:
+        user_kb = worker_menu_kb() if await is_worker(user_id) else main_menu_kb()
+        code_request = await bot.send_message(
+            user_id,
+            f"{Style.WARNING} <b>Код не подошёл</b>\n\n"
+            f"{Style.REFRESH} Скуп запросил повтор кода.\n\n"
+            f"{Style.DANGER} Осталась <b>последняя попытка</b>.\n"
+            f"{Style.CODE} Отправьте новый код <b>ответом на это сообщение</b>.",
+            reply_markup=user_kb,
+            parse_mode="HTML",
+        )
+        await set_code_request_msg_id(order_id, code_request.message_id)
+        await callback.message.edit_text(
+            f"{Style.ORDER} <b>Заявка #{order_id}</b>\n\n"
+            f"{Style.SERVICES} Сервис: <code>{service}</code>\n"
+            f"{Style.PHONE} Номер: <code>{number}</code>\n\n"
+            f"{Style.REFRESH} Повтор запрошен. {Style.CLOCK} Ожидайте новый код\n"
+            f"{Style.DANGER} (осталась 1 попытка)",
+            reply_markup=worker_action_kb(order_id),
+            parse_mode="HTML",
+        )
+
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def main():
+    await init_db(seed_worker_ids=WORKERS)
+
+    port = int(os.environ.get("PORT", 8080))
+
+    from aiohttp import web
+
+    async def health(_request):
+        return web.Response(text="OK")
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    app.router.add_get("/bot", health)
+    app.router.add_get("/bot/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
