@@ -1,17 +1,1483 @@
-name: Deploy to Render
+import json
+from aiogram import Router, F, Bot
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 
-on:
-  push:
-    branches: [main]
+from config import ADMINS
+from states import AdminState
+from ai_assistant import ai_assistant
+from db import (
+    get_all_workers,
+    get_worker_services,
+    set_worker_services,
+    get_user_id_by_username,
+    get_username_by_id,
+    get_all_users,
+    delete_user,
+    is_worker,
+    add_worker,
+    remove_worker,
+    get_orders_by_number,
+    get_all_service_prices,
+    set_service_price,
+    get_queue_count,
+    get_all_services,
+    get_main_services,
+    get_other_services,
+    get_service_category,
+    set_service_category,
+    add_service,
+    remove_service,
+    get_worker_prices,
+    set_worker_price,
+    get_user_balance,
+    add_user_balance,
+    set_user_balance,
+    get_pending_withdrawals,
+    get_all_withdrawals,
+    mark_withdrawal_paid,
+    get_withdrawal,
+    remove_all_services,
+)
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+router = Router()
 
-      - name: Deploy to Render
-        uses: johnbeynon/render-deploy-action@v0.0.8
-        with:
-          service-id: ${{ secrets.RENDER_SERVICE_ID }}
-          api-key: ${{ secrets.RENDER_API_KEY }}
+# ═══════════════════════════════════════════════════════════════════════════
+#  DESIGN SYSTEM — Единый стиль (дублируем для независимости модуля)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class Style:
+    PRIMARY   = "\U0001f535"
+    SUCCESS   = "\U0001f7e2"
+    DANGER    = "\U0001f534"
+    WARNING   = "\U0001f7e1"
+    INFO      = "\U0001f537"
+    MONEY     = "\U0001f4b0"
+    USER      = "\U0001f464"
+    WORKER    = "\U0001f477"
+    ADMIN     = "\U0001f451"
+    PHONE     = "\U0001f4f1"
+    CODE      = "\U0001f511"
+    ORDER     = "\U0001f4cb"
+    QUEUE     = "\U0001f4ca"
+    BACK      = "\U000025c0\U0000fe0f"
+    HOME      = "\U0001f3e0"
+    SUPPORT   = "\U0001f198"
+    PROFILE   = "\U0001f464"
+    WITHDRAW  = "\U0001f4b8"
+    ACTIVE    = "\U0001f4cb"
+    HISTORY   = "\U0001f550"
+    SETTINGS  = "\U00002699\U0000fe0f"
+    ADD       = "\U00002795"
+    REMOVE    = "\U0001f5d1\U0000fe0f"
+    EDIT      = "\U0000270f\U0000fe0f"
+    SEARCH    = "\U0001f50d"
+    BONUS     = "\U0001f381"
+    PRICE     = "\U0001f3f7\U0000fe0f"
+    BALANCE   = "\U0001f4b3"
+    SERVICES  = "\U0001f9e9"
+    STATS     = "\U0001f4c8"
+    STAR      = "\U00002b50"
+    ARROW_R   = "\U000025b6\U0000fe0f"
+    ARROW_L   = "\U000025c0\U0000fe0f"
+    CHECK     = "\U00002705"
+    CROSS     = "\U0000274c"
+    REFRESH   = "\U0001f504"
+    BELL      = "\U0001f514"
+    CLOCK     = "\U000023f0"
+    CHAT      = "\U0001f4ac"
+    DOC       = "\U0001f4c4"
+    PIN       = "\U0001f4cc"
+    FIRE      = "\U0001f525"
+    CROWN     = "\U0001f451"
+    GEM       = "\U0001f48e"
+    PANEL     = "\U0001f6e0\U0000fe0f"
+    DEALS     = "\U0001f4b1"
+    TAG       = "\U0001f3f7\U0000fe0f"
+    CHART     = "\U0001f4ca"
+    PUZZLE    = "\U0001f9e9"
+    WALLET    = "\U0001f45b"
+
+
+STATUS_LABELS = {
+    "waiting":  f"{Style.CLOCK} Ожидает",
+    "active":   f"{Style.REFRESH} В работе",
+    "accepted": f"{Style.SUCCESS} Принята",
+    "rejected": f"{Style.DANGER} Отклонена",
+}
+
+
+def admin_only(user_id: int) -> bool:
+    return user_id in ADMINS
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MAIN PANEL KEYBOARD
+# ═══════════════════════════════════════════════════════════════════════════
+
+def main_panel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.WORKER} Скупы", callback_data="admin_workers")],
+            [InlineKeyboardButton(text=f"{Style.USER} Пользователи", callback_data="admin_users")],
+            [InlineKeyboardButton(text=f"{Style.SEARCH} Сделки по номеру", callback_data="admin_deals")],
+            [InlineKeyboardButton(text=f"{Style.BONUS} Бонусы", callback_data="admin_bonuses")],
+            [InlineKeyboardButton(text=f"{Style.QUEUE} Очередь", callback_data="admin_queue")],
+            [InlineKeyboardButton(text=f"{Style.PUZZLE} Сервисы", callback_data="admin_services")],
+            [InlineKeyboardButton(text=f"{Style.PRICE} Цены скупов", callback_data="admin_worker_prices")],
+            [InlineKeyboardButton(text=f"{Style.BALANCE} Баланс скупов", callback_data="admin_worker_balance")],
+            [InlineKeyboardButton(text=f"{Style.WITHDRAW} Заявки на выплаты", callback_data="admin_withdrawals")],
+        ]
+    )
+
+
+def back_to_panel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")]
+        ]
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  BONUS PRICES
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def bonus_prices_kb() -> InlineKeyboardMarkup:
+    prices = await get_all_service_prices()
+    all_services = await get_all_services()
+    rows = []
+    for service in all_services:
+        price = prices.get(service, 0)
+        rows.append([InlineKeyboardButton(
+            text=f"{Style.PRICE} {service}: {price} $",
+            callback_data=f"setprice_{service}"
+        )])
+    rows.append([InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SERVICES KEYBOARD
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def services_kb() -> InlineKeyboardMarkup:
+    rows = []
+    main_svcs = await get_main_services()
+    main_set = set(main_svcs)
+    for service in await get_all_services():
+        cat_icon = f"{Style.STAR}" if service in main_set else f"{Style.INFO}"
+        rows.append([InlineKeyboardButton(text=f"{cat_icon} {service}", callback_data=f"admsrv_{service}")])
+    rows.append([
+        InlineKeyboardButton(text=f"{Style.ADD} Добавить", callback_data="admin_add_service"),
+        InlineKeyboardButton(text=f"{Style.REMOVE} Удалить все", callback_data="admin_remove_all_services"),
+    ])
+    rows.append([InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WORKER PRICES KEYBOARD
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def worker_prices_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for wid in await get_all_workers():
+        username = await get_username_by_id(wid)
+        label = f"@{username}" if username else str(wid)
+        rows.append([InlineKeyboardButton(text=f"{Style.WORKER} {label}", callback_data=f"workerprice_{wid}")])
+    rows.append([InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WORKERS KEYBOARD
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def workers_keyboard() -> InlineKeyboardMarkup:
+    workers = await get_all_workers()
+    rows = []
+    for wid in workers:
+        username = await get_username_by_id(wid)
+        label = f"@{username}" if username else str(wid)
+        services = await get_worker_services(wid)
+        services_str = ", ".join(services) if services else "без сервисов"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{Style.WORKER} {label} — {services_str}",
+                callback_data=f"winfo_{wid}"
+            )
+        ])
+    rows.append([InlineKeyboardButton(text=f"{Style.ADD} Добавить скупа", callback_data="admin_add_worker")])
+    rows.append([InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ADMIN PANEL COMMAND
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.message(Command("admin"))
+async def admin_panel(message: Message, state: FSMContext):
+    if not admin_only(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer(
+        f"{Style.PANEL} <b>Панель администратора</b>",
+        reply_markup=main_panel_kb(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "admin_panel")
+async def back_to_main(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    await callback.message.edit_text(
+        f"{Style.PANEL} <b>Панель администратора</b>",
+        reply_markup=main_panel_kb(),
+        parse_mode="HTML",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WORKERS SECTION
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_workers")
+async def show_workers(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    kb = await workers_keyboard()
+    await callback.message.edit_text(
+        f"{Style.WORKER} <b>Скупы:</b>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("winfo_"))
+async def worker_info(callback: CallbackQuery):
+    if not admin_only(callback.from_user.id):
+        return
+    worker_id = int(callback.data.split("_", 1)[1])
+    username = await get_username_by_id(worker_id)
+    label = f"@{username}" if username else str(worker_id)
+    services = await get_worker_services(worker_id)
+    services_str = ", ".join(services) if services else "не назначены"
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.SETTINGS} Изменить сервисы", callback_data=f"wsetservices_{worker_id}")],
+            [InlineKeyboardButton(text=f"{Style.PRICE} Цены скупа", callback_data=f"wprices_{worker_id}")],
+            [InlineKeyboardButton(text=f"{Style.REMOVE} Удалить скупа", callback_data=f"wremove_{worker_id}")],
+            [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_workers")],
+        ]
+    )
+    await callback.message.edit_text(
+        f"{Style.WORKER} <b>Скуп:</b> <code>{label}</code>\n"
+        f"{Style.INFO} ID: <code>{worker_id}</code>\n"
+        f"{Style.SERVICES} Сервисы: <code>{services_str}</code>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("wprices_"))
+async def worker_prices_info(callback: CallbackQuery):
+    if not admin_only(callback.from_user.id):
+        return
+    worker_id = int(callback.data.split("_", 1)[1])
+    username = await get_username_by_id(worker_id)
+    label = f"@{username}" if username else str(worker_id)
+    prices = await get_worker_prices(worker_id)
+    services = await get_worker_services(worker_id)
+    lines = [f"{Style.PRICE} <b>Цены скупа:</b> <code>{label}</code>", ""]
+    if services:
+        for service in services:
+            price = prices.get(service, 0)
+            lines.append(f"  {Style.PRICE} {service}: <code>{price} $</code>")
+    else:
+        lines.append(f"{Style.WARNING} Скупу пока не назначены сервисы.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{Style.EDIT} Изменить цену", callback_data=f"workerprice_{worker_id}")],
+        [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data=f"winfo_{worker_id}")],
+    ])
+    await callback.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("wremove_"))
+async def remove_worker_cb(callback: CallbackQuery, bot: Bot):
+    if not admin_only(callback.from_user.id):
+        return
+    worker_id = int(callback.data.split("_", 1)[1])
+    username = await get_username_by_id(worker_id)
+    label = f"@{username}" if username else str(worker_id)
+    await remove_worker(worker_id)
+    try:
+        await bot.send_message(worker_id, f"{Style.CROSS} Вы удалены из списка скупов.")
+    except Exception:
+        pass
+    kb = await workers_keyboard()
+    await callback.message.edit_text(
+        f"{Style.CROSS} <code>{label}</code> удалён из скупов.\n\n"
+        f"{Style.WORKER} <b>Скупы:</b>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("wsetservices_"))
+async def set_services_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    worker_id = int(callback.data.split("_", 1)[1])
+    username = await get_username_by_id(worker_id)
+    label = f"@{username}" if username else str(worker_id)
+    current = await get_worker_services(worker_id)
+    current_str = ", ".join(current) if current else "не назначены"
+    await state.set_state(AdminState.removing_worker_services)
+    await state.update_data(target_worker_id=worker_id)
+    all_services = await get_all_services()
+    await callback.message.edit_text(
+        f"{Style.SETTINGS} <b>Сервисы для {label}</b>\n"
+        f"{Style.INFO} Текущие: <code>{current_str}</code>\n\n"
+        f"{Style.DOC} Введите сервисы через запятую:\n"
+        f"{Style.INFO} Доступные: <code>{', '.join(all_services)}</code>\n\n"
+        f"{Style.INFO} Пример: VK,TG",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.BACK} Отмена", callback_data=f"winfo_{worker_id}")]
+        ]),
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminState.removing_worker_services)
+async def set_services_input(message: Message, state: FSMContext, bot: Bot):
+    if not admin_only(message.from_user.id):
+        return
+    data = await state.get_data()
+    worker_id = data["target_worker_id"]
+    username = await get_username_by_id(worker_id)
+    label = f"@{username}" if username else str(worker_id)
+    all_services = await get_all_services()
+    raw = [s.strip() for s in message.text.split(",")]
+    valid = [s for s in raw if s in all_services]
+    invalid = [s for s in raw if s not in all_services]
+    if not valid:
+        await message.answer(
+            f"{Style.CROSS} Ни один сервис не распознан.\n"
+            f"{Style.INFO} Доступные: <code>{', '.join(all_services)}</code>"
+        )
+        return
+    await set_worker_services(worker_id, valid)
+    await state.clear()
+    try:
+        await bot.send_message(worker_id, f"{Style.BELL} Вам назначены сервисы: <code>{', '.join(valid)}</code>", parse_mode="HTML")
+    except Exception:
+        pass
+    msg = f"{Style.CHECK} <code>{label}</code> — сервисы обновлены: <code>{', '.join(valid)}</code>"
+    if invalid:
+        msg += f"\n{Style.WARNING} Не распознаны: <code>{', '.join(invalid)}</code>"
+    kb = await workers_keyboard()
+    await message.answer(msg + "\n\n" + f"{Style.WORKER} <b>Скупы:</b>", reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin_add_worker")
+async def add_worker_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.set_state(AdminState.adding_worker)
+    await callback.message.edit_text(
+        f"{Style.ADD} <b>Добавление скупа</b>\n\n"
+        f"{Style.DOC} Введите @username скупа:\n"
+        f"{Style.WARNING} Пользователь должен сначала написать /start боту.",
+        reply_markup=back_to_panel_kb(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminState.adding_worker)
+async def add_worker_input(message: Message, state: FSMContext, bot: Bot):
+    if not admin_only(message.from_user.id):
+        return
+    username = message.text.strip()
+    worker_id = await get_user_id_by_username(username)
+    if not worker_id:
+        await message.answer(
+            f"{Style.CROSS} Пользователь <code>{username}</code> не найден.\n"
+            f"{Style.INFO} Попросите его написать /start боту, затем попробуйте снова.",
+            reply_markup=back_to_panel_kb(),
+            parse_mode="HTML",
+        )
+        return
+    if await is_worker(worker_id):
+        await message.answer(f"{Style.WARNING} <code>{username}</code> уже является скупом.")
+        await state.clear()
+        kb = await workers_keyboard()
+        await message.answer(f"{Style.WORKER} <b>Скупы:</b>", reply_markup=kb, parse_mode="HTML")
+        return
+    await add_worker(worker_id)
+    await state.clear()
+    try:
+        await bot.send_message(worker_id, f"{Style.WORKER} Вы назначены скупом. Напишите /start чтобы начать работу.")
+    except Exception:
+        pass
+    kb = await workers_keyboard()
+    await message.answer(
+        f"{Style.CHECK} <code>{username}</code> добавлен как скуп.\n\n"
+        f"{Style.WORKER} <b>Скупы:</b>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  USERS SECTION
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_users")
+async def show_users(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    all_users = await get_all_users()
+    total = len(all_users)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{Style.REMOVE} Удалить пользователя", callback_data="admin_delete_user")],
+        [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")],
+    ])
+    await callback.message.edit_text(
+        f"{Style.USER} <b>Пользователи</b>\n\n"
+        f"{Style.INFO} Всего в базе: <b>{total}</b> чел.",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "admin_delete_user")
+async def delete_user_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.set_state(AdminState.deleting_user)
+    await callback.message.edit_text(
+        f"{Style.REMOVE} <b>Удаление пользователя</b>\n\n"
+        f"{Style.DOC} Введите @username пользователя:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.BACK} Отмена", callback_data="admin_users")]
+        ]),
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminState.deleting_user)
+async def delete_user_input(message: Message, state: FSMContext):
+    if not admin_only(message.from_user.id):
+        return
+    username = message.text.strip()
+    user_id = await get_user_id_by_username(username)
+    if not user_id:
+        await message.answer(
+            f"{Style.CROSS} Пользователь <code>{username}</code> не найден в базе.",
+            reply_markup=back_to_panel_kb(),
+            parse_mode="HTML",
+        )
+        return
+    if await is_worker(user_id):
+        await message.answer(
+            f"{Style.WARNING} <code>{username}</code> является скупом.\n"
+            f"{Style.INFO} Сначала удалите его из скупов через раздел {Style.WORKER} Скупы.",
+            reply_markup=back_to_panel_kb(),
+            parse_mode="HTML",
+        )
+        await state.clear()
+        return
+    await delete_user(user_id)
+    await state.clear()
+    all_users = await get_all_users()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{Style.REMOVE} Удалить пользователя", callback_data="admin_delete_user")],
+        [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")],
+    ])
+    await message.answer(
+        f"{Style.CHECK} Пользователь <code>{username}</code> удалён из базы.\n\n"
+        f"{Style.USER} <b>Пользователи</b>\n"
+        f"{Style.INFO} Всего в базе: <b>{len(all_users)}</b> чел.",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  BONUSES / PRICES
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_bonuses")
+async def show_bonuses(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    kb = await bonus_prices_kb()
+    await callback.message.edit_text(
+        f"{Style.BONUS} <b>Бонусы / цены по сервисам:</b>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("setprice_"))
+async def set_price_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    service = callback.data[9:]
+    await state.update_data(target_service=service)
+    await state.set_state(AdminState.setting_price)
+    await callback.message.edit_text(
+        f"{Style.MONEY} <b>Введите новую цену для сервиса {service}</b> (для пользователей):",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.BACK} Отмена", callback_data="admin_bonuses")]
+        ]),
+    )
+    await callback.answer()
+
+
+@router.message(AdminState.setting_price)
+async def set_price_input(message: Message, state: FSMContext):
+    if not admin_only(message.from_user.id):
+        return
+    data = await state.get_data()
+    service = data.get("target_service", "")
+    try:
+        price = float(message.text.strip().replace(",", "."))
+    except ValueError:
+        await message.answer(
+            f"{Style.CROSS} Введите число (например: 50 или 1.5)",
+            parse_mode="HTML",
+        )
+        return
+    await set_service_price(service, price)
+    await state.clear()
+    kb = await bonus_prices_kb()
+    await message.answer(
+        f"{Style.CHECK} Цена для <code>{service}</code> установлена: <code>{price} $</code>\n\n"
+        f"{Style.BONUS} <b>Бонусы / цены:</b>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WORKER PRICES
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_worker_prices")
+async def show_worker_prices(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    kb = await worker_prices_kb()
+    await callback.message.edit_text(
+        f"{Style.PRICE} <b>Выберите скупа для цены:</b>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_worker_balance")
+async def show_worker_balance(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    rows = []
+    for wid in await get_all_workers():
+        username = await get_username_by_id(wid)
+        balance = await get_user_balance(wid)
+        label = f"@{username}" if username else str(wid)
+        rows.append([InlineKeyboardButton(
+            text=f"{Style.WORKER} {label}: {balance} $",
+            callback_data=f"workerbal_{wid}"
+        )])
+    rows.append([InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")])
+    await callback.message.edit_text(
+        f"{Style.BALANCE} <b>Баланс скупов:</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("workerbal_"))
+async def worker_balance_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    worker_id = int(callback.data.split("_", 1)[1])
+    await state.update_data(target_worker_id=worker_id)
+    await state.set_state(AdminState.topping_up_worker_balance)
+    await callback.message.edit_text(
+        f"{Style.MONEY} <b>Введите сумму пополнения баланса скупа</b> (например 50):",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminState.topping_up_worker_balance)
+async def worker_balance_input(message: Message, state: FSMContext):
+    if not admin_only(message.from_user.id):
+        return
+    data = await state.get_data()
+    worker_id = data.get("target_worker_id")
+    try:
+        amount = int(message.text.strip())
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer(
+            f"{Style.CROSS} Введите целое число больше 0",
+            parse_mode="HTML",
+        )
+        return
+    await add_user_balance(worker_id, amount)
+    balance = await get_user_balance(worker_id)
+    await state.clear()
+    await message.answer(
+        f"{Style.CHECK} Баланс скупа пополнен.\n"
+        f"{Style.MONEY} Теперь: <code>{balance} $</code>",
+        parse_mode="HTML",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WITHDRAWALS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_withdrawals")
+async def show_withdrawals(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    rows = await get_all_withdrawals()
+    if not rows:
+        await callback.message.edit_text(
+            f"{Style.WITHDRAW} <b>Заявки на выплаты</b>\n\n"
+            f"{Style.INFO} Пока заявок нет.",
+            reply_markup=main_panel_kb(),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+    lines = [f"{Style.WITHDRAW} <b>Заявки на выплаты:</b>\n"]
+    kb_rows = []
+    for wid, user_id, amount, details, status in rows:
+        username = await get_username_by_id(user_id)
+        user_label = f"@{username}" if username else str(user_id)
+        status_text = f"{Style.SUCCESS} ОПЛАЧЕНА" if status == 'paid' else f"{Style.CLOCK} НЕ ОПЛАЧЕНА"
+        lines.append(f"#{wid} | {user_label} | {amount} $ | {status_text}")
+        kb_rows.append([InlineKeyboardButton(
+            text=f"#{wid} | {status_text}",
+            callback_data=f"wddtl_{wid}"
+        )])
+    kb_rows.append([InlineKeyboardButton(text=f"{Style.REFRESH} Обновить", callback_data="admin_withdrawals")])
+    kb_rows.append([InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")])
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("wddtl_"))
+async def withdrawal_detail(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    withdrawal_id = int(callback.data.split("_", 1)[1])
+    row = await get_withdrawal(withdrawal_id)
+    if not row:
+        await callback.answer(f"{Style.CROSS} Заявка не найдена")
+        return
+    wid, user_id, amount, details, status = row
+    username = await get_username_by_id(user_id)
+    user_label = f"@{username}" if username else str(user_id)
+    status_text = f"{Style.SUCCESS} ОПЛАЧЕНА" if status == 'paid' else f"{Style.CLOCK} НЕ ОПЛАЧЕНА"
+    text = (
+        f"{Style.WITHDRAW} <b>Заявка #{wid}</b>\n\n"
+        f"{Style.USER} Пользователь: <code>{user_label}</code>\n"
+        f"{Style.MONEY} Сумма: <code>{amount} $</code>\n"
+        f"{Style.DOC} Реквизиты: <code>{details}</code>\n"
+        f"{Style.INFO} Статус: {status_text}"
+    )
+    kb = []
+    if status != 'paid':
+        kb.append([InlineKeyboardButton(
+            text=f"{Style.CHECK} Отметить оплаченной",
+            callback_data=f"wdpaid_{wid}"
+        )])
+    kb.append([InlineKeyboardButton(
+        text=f"{Style.BACK} Назад к списку",
+        callback_data="admin_withdrawals"
+    )])
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("wdpaid_"))
+async def mark_withdrawal_paid_handler(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    withdrawal_id = int(callback.data.split("_", 1)[1])
+    row = await get_withdrawal(withdrawal_id)
+    if not row:
+        await callback.answer(f"{Style.CROSS} Заявка не найдена")
+        return
+    if row[4] == 'paid':
+        await callback.answer(f"{Style.CHECK} Эта заявка уже оплачена")
+        return
+    await mark_withdrawal_paid(withdrawal_id)
+    await callback.answer(f"{Style.CHECK} Заявка #{withdrawal_id} отмечена оплаченной")
+    await withdrawal_detail(callback, state)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  WORKER PRICE SETTING
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("workerprice_"))
+async def worker_price_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    worker_id = int(callback.data.split("_", 1)[1])
+    await state.update_data(target_worker_id=worker_id)
+    await state.set_state(AdminState.setting_worker_price)
+    services = await get_worker_services(worker_id)
+    all_services = await get_all_services()
+    await callback.message.edit_text(
+        f"{Style.PRICE} <b>Введите цену скупа по формату:</b> сервис цена\n"
+        f"{Style.INFO} Пример: VK 120\n"
+        f"{Style.INFO} Доступные сервисы: <code>{', '.join(services) if services else ', '.join(all_services)}</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.BACK} Отмена", callback_data="admin_worker_prices")]
+        ]),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(AdminState.setting_worker_price)
+async def worker_price_input(message: Message, state: FSMContext):
+    if not admin_only(message.from_user.id):
+        return
+    data = await state.get_data()
+    worker_id = data.get("target_worker_id")
+    parts = message.text.strip().split()
+    if len(parts) != 2:
+        await message.answer(
+            f"{Style.CROSS} Формат: сервис цена. Пример: VK 120",
+            parse_mode="HTML",
+        )
+        return
+    service, price_raw = parts
+    try:
+        price = float(price_raw.replace(",", "."))
+    except ValueError:
+        await message.answer(
+            f"{Style.CROSS} Цена должна быть числом (например: 120 или 1.5)",
+            parse_mode="HTML",
+        )
+        return
+    await set_worker_price(worker_id, service, price)
+    await state.clear()
+    kb = await worker_prices_kb()
+    await message.answer(
+        f"{Style.CHECK} Цена для скупа <code>{worker_id}</code> по сервису <code>{service}</code>: <code>{price} $</code>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  QUEUE
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_queue")
+async def show_queue(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    lines = [f"{Style.QUEUE} <b>Очередь номеров по сервисам:</b>\n"]
+    all_services = await get_all_services()
+    for service in all_services:
+        count = await get_queue_count(service)
+        lines.append(f"  {Style.PHONE} {service}: <b>{count}</b> номеров")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")]
+    ])
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  DEALS SEARCH
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_deals")
+async def deals_section(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.set_state(AdminState.searching_orders)
+    await callback.message.edit_text(
+        f"{Style.SEARCH} <b>Поиск сделок по номеру</b>\n\n"
+        f"{Style.DOC} Введите номер телефона:\n"
+        f"{Style.INFO} Формат: +79121231212 или 79121231212",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")]
+        ]),
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminState.searching_orders)
+async def search_orders_input(message: Message, state: FSMContext):
+    if not admin_only(message.from_user.id):
+        return
+    number = message.text.strip()
+    orders = await get_orders_by_number(number)
+    await state.clear()
+    if not orders:
+        await message.answer(
+            f"{Style.INFO} По номеру <code>{number}</code> сделок не найдено.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"{Style.SEARCH} Новый поиск", callback_data="admin_deals")],
+                [InlineKeyboardButton(text=f"{Style.BACK} Панель", callback_data="admin_panel")],
+            ]),
+            parse_mode="HTML",
+        )
+        return
+    lines = [f"{Style.SEARCH} <b>Сделки по номеру {number}:</b>\n"]
+    for order in orders:
+        oid, user_id, service, num, code, status, worker_id = order
+        worker_name = None
+        if worker_id:
+            worker_name = await get_username_by_id(worker_id)
+        worker_str = f"@{worker_name}" if worker_name else (str(worker_id) if worker_id else "—")
+        status_label = STATUS_LABELS.get(status, status)
+        code_str = code if code else "—"
+        lines.append(
+            f"━━━━━━━━━━━━\n"
+            f"{Style.ORDER} <b>Заявка #{oid}</b>\n"
+            f"{Style.PHONE} Сервис: <code>{service}</code>\n"
+            f"{Style.USER} Пользователь: <code>{user_id}</code>\n"
+            f"{Style.WORKER} Скуп: <code>{worker_str}</code>\n"
+            f"{Style.CODE} Код: <code>{code_str}</code>\n"
+            f"{Style.INFO} Статус: {status_label}"
+        )
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.SEARCH} Новый поиск", callback_data="admin_deals")],
+            [InlineKeyboardButton(text=f"{Style.BACK} Панель", callback_data="admin_panel")],
+        ]),
+        parse_mode="HTML",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SERVICES MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "admin_services")
+async def show_services(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    kb = await services_kb()
+    all_svcs = await get_all_services()
+    main_count = len(await get_main_services())
+    other_count = len(all_svcs) - main_count
+    await callback.message.edit_text(
+        f"{Style.PUZZLE} <b>Сервисы:</b> <b>{len(all_svcs)}</b> шт.\n"
+        f"  {Style.STAR} Основные: <b>{main_count}</b>\n"
+        f"  {Style.INFO} Другие: <b>{other_count}</b>\n\n"
+        f"{Style.STAR} — основной  |  {Style.INFO} — другие\n"
+        f"{Style.INFO} Нажмите на сервис, чтобы изменить категорию или удалить.",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_add_service")
+async def add_service_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.set_state(AdminState.adding_service)
+    await callback.message.edit_text(
+        f"{Style.ADD} <b>Добавление сервиса</b>\n\n"
+        f"{Style.DOC} Введите название нового сервиса:",
+        reply_markup=back_to_panel_kb(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(AdminState.adding_service)
+async def add_service_input(message: Message, state: FSMContext):
+    if not admin_only(message.from_user.id):
+        return
+    service = message.text.strip()
+    if not service:
+        await message.answer(f"{Style.CROSS} Пустое название", parse_mode="HTML")
+        return
+    if service.isdigit():
+        await message.answer(f"{Style.CROSS} Название сервиса не может быть только числом", parse_mode="HTML")
+        return
+    if service.startswith("_"):
+        await message.answer(f"{Style.CROSS} Недопустимое название", parse_mode="HTML")
+        return
+    await add_service(service)
+    await state.clear()
+    kb = await services_kb()
+    await message.answer(
+        f"{Style.CHECK} Сервис добавлен: <code>{service}</code>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("admsrv_"))
+async def service_manage(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    service = callback.data[len("admsrv_"):]
+    cat = await get_service_category(service)
+    cat_label = f"{Style.STAR} Основной" if cat == 'main' else f"{Style.INFO} Другие"
+    toggle_text = f"{Style.ARROW_L} Перенести в другие" if cat == 'main' else f"{Style.ARROW_R} Перенести в основные"
+    toggle_data = f"srvoth_{service}" if cat == 'main' else f"srvmain_{service}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=toggle_text, callback_data=toggle_data)],
+        [InlineKeyboardButton(text=f"{Style.MONEY} Установить цену", callback_data=f"setprice_{service}")],
+        [InlineKeyboardButton(text=f"{Style.REMOVE} Удалить сервис", callback_data=f"srvrm_{service}")],
+        [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_services")],
+    ])
+    await callback.message.edit_text(
+        f"{Style.PUZZLE} <b>Сервис:</b> <code>{service}</code>\n"
+        f"{Style.INFO} Категория: {cat_label}",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("srvmain_"))
+async def service_set_main(callback: CallbackQuery):
+    if not admin_only(callback.from_user.id):
+        return
+    service = callback.data[len("srvmain_"):]
+    await set_service_category(service, 'main')
+    await callback.answer(f"{service} → Основной список")
+    await service_manage(callback, None)
+
+
+@router.callback_query(F.data.startswith("srvoth_"))
+async def service_set_other(callback: CallbackQuery):
+    if not admin_only(callback.from_user.id):
+        return
+    service = callback.data[len("srvoth_"):]
+    await set_service_category(service, 'other')
+    await callback.answer(f"{service} → Другие сервисы")
+    await service_manage(callback, None)
+
+
+@router.callback_query(F.data.startswith("srvrm_"))
+async def service_remove_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    service = callback.data[len("srvrm_"):]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{Style.CHECK} Подтвердить удаление", callback_data=f"srvrmc_{service}")],
+        [InlineKeyboardButton(text=f"{Style.BACK} Отмена", callback_data="admin_services")],
+    ])
+    await callback.message.edit_text(
+        f"{Style.REMOVE} Удалить сервис <code>{service}</code>?",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("srvrmc_"))
+async def service_remove_confirm(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    service = callback.data[len("srvrmc_"):]
+    await remove_service(service)
+    kb = await services_kb()
+    await callback.message.edit_text(
+        f"{Style.CHECK} Сервис удалён: <code>{service}</code>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_remove_all_services")
+async def remove_all_services_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{Style.DANGER} Да, удалить всё", callback_data="admin_remove_all_services_confirm")],
+        [InlineKeyboardButton(text=f"{Style.BACK} Отмена", callback_data="admin_services")],
+    ])
+    await callback.message.edit_text(
+        f"{Style.WARNING} <b>Удалить все сервисы и связанные данные?</b>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_remove_all_services_confirm")
+async def remove_all_services_confirm(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await remove_all_services()
+    await state.clear()
+    await callback.message.edit_text(
+        f"{Style.CHECK} <b>Все сервисы удалены.</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")]
+        ]),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  AI ASSISTANT
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.message(Command("ai"))
+async def ai_start(message: Message, state: FSMContext):
+    if not admin_only(message.from_user.id):
+        return
+    await state.set_state(AdminState.ai_assistant_chat)
+    ai_assistant.clear_history(message.from_user.id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{Style.CROSS} Выйти из AI-режима", callback_data="ai_exit")],
+    ])
+    await message.answer(
+        f"{Style.GEM} <b>AI-ассистент активирован</b>\n\n"
+        f"{Style.INFO} Примеры запросов:\n"
+        f"  • "покажи очередь"\n"
+        f"  • "назначь @ivan скупом для VK"\n"
+        f"  • "поставь цену на Steam 150"\n"
+        f"  • "удали сервис OK"\n"
+        f"  • "пополни баланс скупа 123456 на 500"\n\n"
+        f"{Style.WARNING} Опасные действия требуют подтверждения.\n"
+        f"{Style.INFO} Используйте /ai для сброса диалога.",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "ai_exit")
+async def ai_exit(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    ai_assistant.clear_history(callback.from_user.id)
+    await callback.message.edit_text(
+        f"{Style.CROSS} AI-ассистент деактивирован.\n"
+        f"{Style.INFO} Используйте /admin для панели управления."
+    )
+    await callback.answer()
+
+
+@router.message(AdminState.ai_assistant_chat)
+async def ai_chat_handler(message: Message, state: FSMContext):
+    if not admin_only(message.from_user.id):
+        return
+
+    # Проверяем выход
+    if message.text.lower() in ["exit", "выход", "quit", "стоп", "/ai_exit"]:
+        await state.clear()
+        ai_assistant.clear_history(message.from_user.id)
+        await message.answer(
+            f"{Style.CROSS} AI-ассистент деактивирован.",
+            reply_markup=main_panel_kb(),
+        )
+        return
+
+    # Показываем что думаем
+    thinking = await message.answer(f"{Style.REFRESH} <i>AI думает...</i>", parse_mode="HTML")
+
+    # Отправляем в AI
+    result = await ai_assistant.process(message.from_user.id, message.text)
+
+    # Удаляем "думает"
+    try:
+        await thinking.delete()
+    except Exception:
+        pass
+
+    intent = result.get("intent", "unknown")
+    params = result.get("params", {})
+    explanation = result.get("explanation", "Нет объяснения")
+    requires_confirmation = result.get("requires_confirmation", False)
+
+    # Обработка ошибок
+    if intent == "error":
+        await message.answer(
+            f"{Style.CROSS} <b>Ошибка AI</b>\n\n{explanation}",
+            parse_mode="HTML",
+        )
+        return
+
+    # Если нужны параметры
+    if intent == "need_params":
+        await message.answer(
+            f"{Style.WARNING} <b>Недостаточно данных</b>\n\n{explanation}",
+            parse_mode="HTML",
+        )
+        return
+
+    # Если неизвестный запрос
+    if intent == "unknown":
+        await message.answer(
+            f"{Style.INFO} <b>Не понял запрос</b>\n\n{explanation}\n\n"
+            f"{Style.INFO} Попробуйте: /ai для справки",
+            parse_mode="HTML",
+        )
+        return
+
+    # БЕЗОПАСНЫЕ ДЕЙСТВИЯ — выполняем сразу
+    if intent in ai_assistant.SAFE_INTENTS and not requires_confirmation:
+        await _execute_safe_intent(message, intent, params, explanation)
+        return
+
+    # ОПАСНЫЕ ДЕЙСТВИЯ — требуем подтверждения
+    if intent in ai_assistant.DANGEROUS_INTENTS or requires_confirmation:
+        # Сохраняем intent в состояние для подтверждения
+        await state.update_data(
+            pending_ai_intent=intent,
+            pending_ai_params=params,
+            pending_ai_explanation=explanation,
+        )
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"{Style.CHECK} Подтвердить",
+                callback_data="ai_confirm"
+            )],
+            [InlineKeyboardButton(
+                text=f"{Style.CROSS} Отменить",
+                callback_data="ai_cancel"
+            )],
+        ])
+
+        await message.answer(
+            f"{Style.WARNING} <b>Требуется подтверждение</b>\n\n"
+            f"{Style.INFO} Действие: <code>{intent}</code>\n"
+            f"{Style.DOC} Параметры: <code>{json.dumps(params, ensure_ascii=False)}</code>\n\n"
+            f"{explanation}",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        return
+
+    # Fallback — просто показываем объяснение
+    await message.answer(
+        f"{Style.INFO} <b>AI ответ:</b>\n\n{explanation}",
+        parse_mode="HTML",
+    )
+
+
+async def _execute_safe_intent(message: Message, intent: str, params: dict, explanation: str):
+    """Выполнить безопасное действие"""
+    from db import (
+        get_all_workers, get_worker_services, get_all_users,
+        get_all_services, get_all_service_prices, get_queue_count,
+        get_all_withdrawals, get_worker_prices, get_user_balance,
+        get_orders_by_number,
+    )
+
+    lines = [f"{Style.INFO} <b>{explanation}</b>\n"]
+
+    if intent == "show_stats":
+        # Статистика по боту
+        workers = await get_all_workers()
+        users = await get_all_users()
+        services = await get_all_services()
+        total_queue = 0
+        for svc in services:
+            total_queue += await get_queue_count(svc)
+
+        lines.append(
+            f"{Style.STATS} <b>Общая статистика:</b>\n"
+            f"  {Style.WORKER} Скупов: <b>{len(workers)}</b>\n"
+            f"  {Style.USER} Пользователей: <b>{len(users)}</b>\n"
+            f"  {Style.SERVICES} Сервисов: <b>{len(services)}</b>\n"
+            f"  {Style.QUEUE} Заявок в очереди: <b>{total_queue}</b>"
+        )
+
+    elif intent == "show_queue":
+        services = await get_all_services()
+        lines.append(f"{Style.QUEUE} <b>Очередь по сервисам:</b>")
+        for svc in services:
+            count = await get_queue_count(svc)
+            lines.append(f"  {Style.PHONE} {svc}: <b>{count}</b>")
+
+    elif intent == "show_workers":
+        workers = await get_all_workers()
+        lines.append(f"{Style.WORKER} <b>Скупы:</b>")
+        for wid in workers:
+            username = await get_username_by_id(wid)
+            services = await get_worker_services(wid)
+            label = f"@{username}" if username else str(wid)
+            svc_str = ", ".join(services) if services else "нет сервисов"
+            lines.append(f"  {Style.WORKER} {label} — {svc_str}")
+
+    elif intent == "show_users":
+        users = await get_all_users()
+        lines.append(f"{Style.USER} <b>Пользователи ({len(users)}):</b>")
+        for uid, uname in users[:20]:
+            label = f"@{uname}" if uname else str(uid)
+            lines.append(f"  {Style.USER} {label}")
+        if len(users) > 20:
+            lines.append(f"  ... и ещё {len(users) - 20}")
+
+    elif intent == "show_withdrawals":
+        rows = await get_all_withdrawals()
+        lines.append(f"{Style.WITHDRAW} <b>Заявки на выплаты:</b>")
+        if not rows:
+            lines.append(f"  {Style.INFO} Пока нет заявок")
+        else:
+            for wid, uid, amount, details, status in rows[:10]:
+                username = await get_username_by_id(uid)
+                user_label = f"@{username}" if username else str(uid)
+                status_icon = f"{Style.SUCCESS} ОПЛ" if status == 'paid' else f"{Style.CLOCK} ЖДЁТ"
+                lines.append(f"  #{wid} | {user_label} | {amount}$ | {status_icon}")
+
+    elif intent == "show_services":
+        services = await get_all_services()
+        prices = await get_all_service_prices()
+        lines.append(f"{Style.SERVICES} <b>Сервисы:</b>")
+        for svc in services:
+            price = prices.get(svc, 0)
+            lines.append(f"  {Style.PHONE} {svc}: <code>{price}$</code>")
+
+    elif intent == "show_bonuses":
+        prices = await get_all_service_prices()
+        lines.append(f"{Style.BONUS} <b>Цены / бонусы:</b>")
+        for svc, price in prices.items():
+            lines.append(f"  {Style.PRICE} {svc}: <code>{price}$</code>")
+
+    elif intent == "search_deals":
+        number = params.get("number", "")
+        if not number:
+            lines.append(f"{Style.WARNING} Укажите номер телефона")
+        else:
+            orders = await get_orders_by_number(number)
+            lines.append(f"{Style.SEARCH} <b>Сделки по {number}:</b>")
+            if not orders:
+                lines.append(f"  {Style.INFO} Не найдено")
+            else:
+                for order in orders[:10]:
+                    oid, uid, svc, num, code, status, wid = order
+                    status_label = STATUS_LABELS.get(status, status)
+                    lines.append(
+                        f"  #{oid} | {svc} | {status_label}"
+                    )
+
+    elif intent == "show_worker_prices":
+        workers = await get_all_workers()
+        lines.append(f"{Style.PRICE} <b>Цены скупов:</b>")
+        for wid in workers:
+            username = await get_username_by_id(wid)
+            prices = await get_worker_prices(wid)
+            label = f"@{username}" if username else str(wid)
+            if prices:
+                price_str = ", ".join([f"{s}:{p}$" for s, p in prices.items()])
+                lines.append(f"  {Style.WORKER} {label}: {price_str}")
+            else:
+                lines.append(f"  {Style.WORKER} {label}: нет цен")
+
+    elif intent == "show_worker_balance":
+        workers = await get_all_workers()
+        lines.append(f"{Style.BALANCE} <b>Баланс скупов:</b>")
+        for wid in workers:
+            username = await get_username_by_id(wid)
+            balance = await get_user_balance(wid)
+            label = f"@{username}" if username else str(wid)
+            lines.append(f"  {Style.WORKER} {label}: <code>{balance}$</code>")
+
+    else:
+        lines.append(f"{Style.INFO} {explanation}")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "ai_confirm")
+async def ai_confirm_handler(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    if not admin_only(callback.from_user.id):
+        return
+
+    data = await state.get_data()
+    intent = data.get("pending_ai_intent")
+    params = data.get("pending_ai_params", {})
+
+    if not intent:
+        await callback.answer(f"{Style.CROSS} Нет pending действия")
+        return
+
+    # Выполняем опасное действие
+    await _execute_dangerous_intent(callback, state, bot, intent, params)
+    await state.update_data(pending_ai_intent=None, pending_ai_params=None)
+    await callback.answer(f"{Style.CHECK} Выполнено!")
+
+
+@router.callback_query(F.data == "ai_cancel")
+async def ai_cancel_handler(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.update_data(pending_ai_intent=None, pending_ai_params=None)
+    await callback.message.edit_text(
+        f"{Style.CROSS} Действие отменено.\n"
+        f"{Style.INFO} Используйте /ai для нового запроса."
+    )
+    await callback.answer()
+
+
+async def _execute_dangerous_intent(callback: CallbackQuery, state: FSMContext, bot: Bot, intent: str, params: dict):
+    """Выполнить опасное действие после подтверждения"""
+    from db import (
+        set_service_price, add_worker, remove_worker, delete_user,
+        remove_service, remove_all_services, mark_withdrawal_paid,
+        add_user_balance, set_worker_price, get_user_id_by_username,
+        is_worker, get_all_services,
+    )
+
+    result_lines = [f"{Style.CHECK} <b>Результат:</b>\n"]
+
+    try:
+        if intent == "set_price":
+            service = params.get("service", "")
+            price = float(params.get("price", 0))
+            if service and price >= 0:
+                await set_service_price(service, price)
+                result_lines.append(f"{Style.CHECK} Цена для <code>{service}</code>: <code>{price}$</code>")
+            else:
+                result_lines.append(f"{Style.CROSS} Неверные параметры")
+
+        elif intent == "add_worker":
+            username = params.get("username", "")
+            worker_id = await get_user_id_by_username(username)
+            if not worker_id:
+                result_lines.append(f"{Style.CROSS} Пользователь <code>{username}</code> не найден")
+            elif await is_worker(worker_id):
+                result_lines.append(f"{Style.WARNING} <code>{username}</code> уже скуп")
+            else:
+                await add_worker(worker_id)
+                try:
+                    await bot.send_message(worker_id, f"{Style.WORKER} Вы назначены скупом!")
+                except Exception:
+                    pass
+                result_lines.append(f"{Style.CHECK} <code>{username}</code> добавлен как скуп")
+
+        elif intent == "remove_worker":
+            username = params.get("username", "")
+            worker_id = await get_user_id_by_username(username)
+            if not worker_id:
+                # Пробуем как ID
+                try:
+                    worker_id = int(params.get("username", 0))
+                except ValueError:
+                    pass
+            if worker_id and await is_worker(worker_id):
+                await remove_worker(worker_id)
+                try:
+                    await bot.send_message(worker_id, f"{Style.CROSS} Вы удалены из скупов")
+                except Exception:
+                    pass
+                result_lines.append(f"{Style.CHECK} Скуп <code>{worker_id}</code> удалён")
+            else:
+                result_lines.append(f"{Style.CROSS} Скуп не найден")
+
+        elif intent == "delete_user":
+            username = params.get("username", "")
+            user_id = await get_user_id_by_username(username)
+            if not user_id:
+                result_lines.append(f"{Style.CROSS} Пользователь <code>{username}</code> не найден")
+            elif await is_worker(user_id):
+                result_lines.append(f"{Style.WARNING} Это скуп — удалите через раздел Скупы")
+            else:
+                await delete_user(user_id)
+                result_lines.append(f"{Style.CHECK} <code>{username}</code> удалён")
+
+        elif intent == "remove_service":
+            service = params.get("service", "")
+            all_svcs = await get_all_services()
+            if service in all_svcs:
+                await remove_service(service)
+                result_lines.append(f"{Style.CHECK} Сервис <code>{service}</code> удалён")
+            else:
+                result_lines.append(f"{Style.CROSS} Сервис <code>{service}</code> не найден")
+
+        elif intent == "remove_all_services":
+            await remove_all_services()
+            result_lines.append(f"{Style.CHECK} Все сервисы удалены")
+
+        elif intent == "mark_paid":
+            withdrawal_id = int(params.get("withdrawal_id", 0))
+            if withdrawal_id:
+                await mark_withdrawal_paid(withdrawal_id)
+                result_lines.append(f"{Style.CHECK} Выплата <code>#{withdrawal_id}</code> отмечена оплаченной")
+            else:
+                result_lines.append(f"{Style.CROSS} Неверный ID выплаты")
+
+        elif intent == "top_up_balance":
+            worker_id = int(params.get("worker_id", 0))
+            amount = int(params.get("amount", 0))
+            if worker_id and amount > 0:
+                await add_user_balance(worker_id, amount)
+                new_bal = await get_user_balance(worker_id)
+                result_lines.append(
+                    f"{Style.CHECK} Баланс <code>{worker_id}</code> пополнен на <code>{amount}$</code>\n"
+                    f"{Style.MONEY} Новый баланс: <code>{new_bal}$</code>"
+                )
+            else:
+                result_lines.append(f"{Style.CROSS} Неверные параметры")
+
+        elif intent == "set_worker_price":
+            worker_id = int(params.get("worker_id", 0))
+            service = params.get("service", "")
+            price = float(params.get("price", 0))
+            if worker_id and service and price >= 0:
+                await set_worker_price(worker_id, service, price)
+                result_lines.append(
+                    f"{Style.CHECK} Цена скупа <code>{worker_id}</code> для <code>{service}</code>: <code>{price}$</code>"
+                )
+            else:
+                result_lines.append(f"{Style.CROSS} Неверные параметры")
+
+        else:
+            result_lines.append(f"{Style.WARNING} Неизвестное действие: <code>{intent}</code>")
+
+    except Exception as e:
+        result_lines.append(f"{Style.CROSS} Ошибка: <code>{str(e)[:200]}</code>")
+
+    await callback.message.edit_text("\n".join(result_lines), parse_mode="HTML")
