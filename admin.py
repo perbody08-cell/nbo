@@ -1194,10 +1194,21 @@ async def _execute_safe_intent(message: Message, intent: str, params: dict, expl
     elif intent == "show_services":
         services = await get_all_services()
         prices = await get_all_service_prices()
-        lines.append(f"{Style.SERVICES} <b>Сервисы:</b>")
+        workers = await get_all_workers()
+
+        # Get active services (services that have workers)
+        active_services = set()
+        for wid in workers:
+            svcs = await get_worker_services(wid)
+            active_services.update(svcs)
+
+        lines.append(f"{Style.SERVICES} <b>Все сервисы в базе:</b>")
         for svc in services:
             price = prices.get(svc, 0)
-            lines.append(f"  {Style.PHONE} {svc}: <code>{price}$</code>")
+            status = f"{Style.SUCCESS} активен" if svc in active_services else f"{Style.CLOCK} нет скупов"
+            lines.append(f"  {Style.PHONE} {svc}: <code>{price}$</code> ({status})")
+        lines.append(f"
+{Style.INFO} Всего: {len(services)} сервисов, активных: {len(active_services)}")
 
     elif intent == "show_bonuses":
         prices = await get_all_service_prices()
