@@ -226,6 +226,10 @@ def worker_action_kb(order_id: int) -> InlineKeyboardMarkup:
 def not_admin(message: Message) -> bool:
     return message.from_user.id not in ADMINS
 
+def admin_only(user_id: int) -> bool:
+    return user_id in ADMINS
+
+
 
 RUSSIAN_PHONE_RE = re.compile(r"^\+?7\d{10}$")
 CODE_RE = re.compile(r"^\d+$")
@@ -275,8 +279,60 @@ async def build_other_services_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+
+
+# Channel subscription check
+REQUIRED_CHANNEL = "@notiyone"
+
+
+async def is_subscribed(user_id: int) -> bool:
+    """Check if user is subscribed to required channel"""
+    try:
+        member = await bot.get_chat_member(chat_id=REQUIRED_CHANNEL, user_id=user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except Exception:
+        return False
+
+
+async def send_subscription_request(message: Message):
+    """Send message asking user to subscribe to channel"""
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.BELL} Подписаться на канал", url=f"https://t.me/{REQUIRED_CHANNEL.lstrip('@')}")],
+            [InlineKeyboardButton(text=f"{Style.REFRESH} Проверить подписку", callback_data="check_subscription")],
+        ]
+    )
+    await message.answer(
+        f"{Style.WARNING} <b>Доступ ограничен</b>\n\n"
+        f"{Style.INFO} Для использования бота необходимо подписаться на канал:\n"
+        f"{Style.BELL} {REQUIRED_CHANNEL}\n\n"
+        f"{Style.INFO} После подписки нажмите «Проверить подписку».",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "check_subscription")
+async def check_subscription_callback(callback: CallbackQuery, state: FSMContext):
+    """Handle subscription check button"""
+    if await is_subscribed(callback.from_user.id):
+        await callback.message.delete()
+        await callback.answer(f"{Style.CHECK} Подписка подтверждена!")
+        # Restart the start flow
+        await start(callback.message, state)
+    else:
+        await callback.answer(
+            f"{Style.CROSS} Вы ещё не подписались на канал {REQUIRED_CHANNEL}",
+            show_alert=True,
+        )
+
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
+    # Check subscription first
+    if not await is_subscribed(message.from_user.id):
+        await send_subscription_request(message)
+        return
+
     await upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
     await state.clear()
 
@@ -330,22 +386,35 @@ async def worker_queue(message: Message, state: FSMContext):
         await message.answer(f"{Style.CROSS} Нет доступа", reply_markup=main_menu_kb())
         return
 
+    # Show worker balance
+    worker_balance = await get_user_balance(message.from_user.id)
+
     orders = await get_available_orders(message.from_user.id)
     if not orders:
-        await message.answer(
-            f"{Style.QUEUE} Очередь пуста. Новые заявки приходят автоматически.",
-            reply_markup=worker_menu_kb(),
-        )
+        msg = f"{Style.QUEUE} Очередь пуста. Новые заявки приходят автоматически.\n\n" + f"{Style.MONEY} Ваш баланс: <code>{worker_balance} $</code>"
+        await message.answer(msg, reply_markup=worker_menu_kb())
         return
 
+    # Show orders with price info
     for oid, uid, svc, number in orders:
+        worker_price = await get_worker_price(message.from_user.id, svc) or 0
+        can_afford = worker_balance >= worker_price if worker_price > 0 else True
+        price_info = f" | {Style.MONEY} {worker_price} $" if worker_price > 0 else ""
+        afford_icon = Style.SUCCESS if can_afford else Style.DANGER
+        afford_text = "Можно взять" if can_afford else f"Нужно: {worker_price} $, у вас: {worker_balance} $"
+
+        msg = f"{Style.ORDER} <b>#{oid}</b> | {Style.PHONE} {svc} | <code>{number}</code>{price_info}\n" + f"{afford_icon} {afford_text}"
+
         await message.answer(
-            f"{Style.ORDER} <b>#{oid}</b> | {Style.PHONE} {svc} | <code>{number}</code>",
-            reply_markup=take_order_kb(oid),
+            msg,
+            reply_markup=take_order_kb(oid) if can_afford else None,
             parse_mode="HTML",
         )
+
+    msg = f"{Style.INFO} Всего: <b>{len(orders)}</b> заявок.\n"
+    msg += f"{Style.MONEY} Ваш баланс: <code>{worker_balance} $</code>"
     await message.answer(
-        f"{Style.INFO} Всего: <b>{len(orders)}</b> заявок.",
+        msg,
         reply_markup=worker_menu_kb(),
         parse_mode="HTML",
     )
@@ -367,6 +436,9 @@ async def worker_balance(message: Message, state: FSMContext):
 
 @dp.message(F.text.contains("Профиль"))
 async def profile_menu(message: Message, state: FSMContext):
+    if not await is_subscribed(message.from_user.id):
+        await send_subscription_request(message)
+        return
     await state.clear()
     uid = message.from_user.id
     user_label = await get_user_display_name(
@@ -407,6 +479,9 @@ async def profile_menu(message: Message, state: FSMContext):
 
 @dp.message(F.text.contains("Выплата"))
 async def withdrawal_start(message: Message, state: FSMContext):
+    if not await is_subscribed(message.from_user.id):
+        await send_subscription_request(message)
+        return
     await state.clear()
     balance = await get_user_balance(message.from_user.id)
     if balance <= 0:
@@ -471,6 +546,9 @@ async def withdrawal_input(message: Message, state: FSMContext):
 
 @dp.message(F.text.contains("Сдать номер"))
 async def submit_number_menu(message: Message, state: FSMContext):
+    if not await is_subscribed(message.from_user.id):
+        await send_subscription_request(message)
+        return
     await state.clear()
     await state.set_state(OrderState.choosing_service)
     kb = await build_services_kb()
@@ -484,6 +562,9 @@ async def submit_number_menu(message: Message, state: FSMContext):
 
 @dp.message(F.text.contains("Поддержка"))
 async def support_menu(message: Message, state: FSMContext):
+    if not await is_subscribed(message.from_user.id):
+        await send_subscription_request(message)
+        return
     await state.clear()
     contacts = await get_admin_contacts(list(ADMINS))
     if contacts:
@@ -503,6 +584,9 @@ async def support_menu(message: Message, state: FSMContext):
 
 @dp.message(F.text.contains("Активные заявки"))
 async def active_orders_menu(message: Message, state: FSMContext):
+    if not await is_subscribed(message.from_user.id):
+        await send_subscription_request(message)
+        return
     await state.clear()
     orders = await get_user_orders_active(message.from_user.id)
     if not orders:
@@ -523,6 +607,9 @@ async def active_orders_menu(message: Message, state: FSMContext):
 
 @dp.message(F.text.contains("Прошлые заявки"))
 async def past_orders_menu(message: Message, state: FSMContext):
+    if not await is_subscribed(message.from_user.id):
+        await send_subscription_request(message)
+        return
     await state.clear()
     orders = await get_user_orders_past(message.from_user.id)
     if not orders:
@@ -543,6 +630,9 @@ async def past_orders_menu(message: Message, state: FSMContext):
 
 @dp.message(F.text.contains("Мои заявки на вывод"))
 async def my_withdrawals_menu(message: Message, state: FSMContext):
+    if not await is_subscribed(message.from_user.id):
+        await send_subscription_request(message)
+        return
     await state.clear()
     rows = await get_user_withdrawals(message.from_user.id)
     if not rows:
@@ -729,7 +819,18 @@ async def take_order_handler(callback: CallbackQuery):
         await callback.answer(f"{Style.CROSS} У вас нет доступа к сервису {service}")
         return
 
+    # Check worker balance before taking order
     worker_id = callback.from_user.id
+    worker_price = await get_worker_price(worker_id, service) or 0
+    if worker_price > 0:
+        worker_balance = await get_user_balance(worker_id)
+        if worker_balance < worker_price:
+            await callback.answer(
+                f"{Style.CROSS} Недостаточно средств! Нужно: {worker_price} $, у вас: {worker_balance} $",
+                show_alert=True,
+            )
+            return
+
     await take_order(order_id, worker_id)
 
     code_request = await bot.send_message(
@@ -764,6 +865,12 @@ async def take_order_handler(callback: CallbackQuery):
 @dp.message(not_admin, ~StateFilter(AdminState))
 async def catch_all(message: Message, state: FSMContext):
     user_id = message.from_user.id
+
+    # Check subscription for regular users
+    if not await is_worker(user_id) and not admin_only(user_id):
+        if not await is_subscribed(user_id):
+            await send_subscription_request(message)
+            return
 
     order = await get_user_active_order(user_id)
 
