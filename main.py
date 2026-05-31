@@ -57,6 +57,24 @@ from db import (
 )
 import admin as admin_module
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  STARTUP DIAGNOSTICS
+# ═══════════════════════════════════════════════════════════════════════════
+import os
+print("=" * 60)
+print("NOTY SMS BOT - STARTUP CHECK")
+print(f"TOKEN from env: {bool(os.environ.get('TELEGRAM_BOT_TOKEN'))}")
+print(f"TOKEN from config: {bool(TOKEN)} (len={len(TOKEN)})")
+print(f"ADMINS: {ADMINS}")
+print(f"WORKERS: {WORKERS}")
+print("=" * 60)
+
+if not TOKEN:
+    print("ERROR: TELEGRAM_BOT_TOKEN is not set!")
+    print("Please set TELEGRAM_BOT_TOKEN in Railway Variables")
+    # Don't exit - let it fail naturally with clear error
+# ═══════════════════════════════════════════════════════════════════════════
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 dp.include_router(admin_module.router)
