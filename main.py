@@ -485,32 +485,40 @@ async def withdrawal_start(message: Message, state: FSMContext):
     await state.clear()
     balance = await get_user_balance(message.from_user.id)
     if balance <= 0:
+        msg = f"{Style.CROSS} На вашем балансе недостаточно средств для вывода.\n\n"
+        msg += f"{Style.MONEY} Ваш баланс: <code>{balance} $</code>"
         await message.answer(
-            f"{Style.CROSS} На вашем балансе недостаточно средств для вывода.",
+            msg,
             reply_markup=main_menu_kb(),
         )
         return
-    await state.set_state(AdminState.entering_withdrawal_details)
-    await state.update_data(withdrawal_amount=balance)
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=f"{Style.CROSS} Отмена", callback_data="cancel_withdrawal")]
-        ]
-    )
+
+    # Auto-submit withdrawal without asking for requisites
+    await add_user_balance(message.from_user.id, -balance)
+    await create_withdrawal(message.from_user.id, balance, "Не указаны — уточнить у пользователя")
+    username = await get_username_by_id(message.from_user.id)
+    user_label = f"@{username}" if username else str(message.from_user.id)
+    for admin_id in ADMINS:
+        try:
+            admin_msg = f"{Style.WITHDRAW} <b>Новая заявка на выплату</b>\n\n"
+            admin_msg += f"{Style.USER} Пользователь: <code>{user_label}</code>\n"
+            admin_msg += f"{Style.MONEY} Сумма: <code>{balance} $</code>\n"
+            admin_msg += f"{Style.DOC} Реквизиты: <code>Не указаны — уточнить у пользователя</code>\n\n"
+            admin_msg += f"{Style.WARNING} Пользователь не указал реквизиты. Свяжитесь с ним для уточнения."
+            await bot.send_message(
+                admin_id,
+                admin_msg,
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+    user_msg = f"{Style.CHECK} Заявка на выплату отправлена администратору.\n\n"
+    user_msg += f"{Style.MONEY} Сумма: <code>{balance} $</code>\n"
+    user_msg += f"{Style.INFO} Администратор свяжется с вами для уточнения реквизитов."
     await message.answer(
-        f"{Style.WITHDRAW} <b>Заявка на вывод</b>\n\n"
-        f"{Style.MONEY} Доступно: <code>{balance} $</code>\n"
-        f"{Style.DOC} Введите реквизиты для вывода:",
-        reply_markup=kb,
-        parse_mode="HTML",
+        user_msg,
+        reply_markup=main_menu_kb(),
     )
-
-
-@dp.callback_query(F.data == "cancel_withdrawal")
-async def cancel_withdrawal(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.edit_text(f"{Style.CROSS} Вывод отменен.")
-    await callback.answer()
 
 
 @dp.message(AdminState.entering_withdrawal_details)
@@ -998,11 +1006,27 @@ async def accept_handler(callback: CallbackQuery):
         await callback.answer(f"{Style.CROSS} Заявка не найдена")
         return
 
+    user_id = order[1]
+    service = order[2]
+
     await accept_order(order_id)
-    await increment_user_limit(order[1], 3)
-    bonus = await get_service_price(order[2])
-    worker_price = await get_worker_price(callback.from_user.id, order[2]) or 0
-    await add_user_balance(order[1], bonus)
+    await increment_user_limit(user_id, 3)
+
+    # Ensure user exists in database before adding balance
+    await upsert_user(user_id, None)
+
+    bonus = await get_service_price(service)
+    worker_price = await get_worker_price(callback.from_user.id, service) or 0
+
+    # Debug logging
+    print(f"[DEBUG] Accept order #{order_id}: user={user_id}, service={service}, bonus={bonus}, worker_price={worker_price}")
+
+    if bonus > 0:
+        await add_user_balance(user_id, bonus)
+        new_balance = await get_user_balance(user_id)
+        print(f"[DEBUG] Added {bonus} $ to user {user_id}, new balance: {new_balance}")
+    else:
+        print(f"[DEBUG] Bonus is 0, not adding balance")
     if bonus != 0:
         sign = "+" if bonus > 0 else ""
         await bot.send_message(
