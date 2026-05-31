@@ -19,6 +19,7 @@ from db import (
     set_worker_services,
     get_user_id_by_username,
     get_username_by_id,
+    get_user_display_name,
     get_all_users,
     delete_user,
     is_worker,
@@ -172,7 +173,13 @@ async def worker_prices_kb() -> InlineKeyboardMarkup:
     rows = []
     for wid in await get_all_workers():
         username = await get_username_by_id(wid)
-        label = f"@{username}" if username else str(wid)
+        if username:
+            if " " in username:
+                label = username
+            else:
+                label = f"@{username}"
+        else:
+            label = f"ID: {wid}"
         rows.append([InlineKeyboardButton(text=f"{Style.WORKER} {label}", callback_data=f"workerprice_{wid}")])
     rows.append([InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -182,8 +189,7 @@ async def workers_keyboard() -> InlineKeyboardMarkup:
     workers = await get_all_workers()
     rows = []
     for wid in workers:
-        username = await get_username_by_id(wid)
-        label = f"@{username}" if username else str(wid)
+        label = await get_user_display_name(wid)
         services = await get_worker_services(wid)
         services_str = ", ".join(services) if services else "без сервисов"
         rows.append([
@@ -239,8 +245,7 @@ async def worker_info(callback: CallbackQuery):
     if not admin_only(callback.from_user.id):
         return
     worker_id = int(callback.data.split("_", 1)[1])
-    username = await get_username_by_id(worker_id)
-    label = f"@{username}" if username else str(worker_id)
+    label = await get_user_display_name(worker_id)
     services = await get_worker_services(worker_id)
     services_str = ", ".join(services) if services else "не назначены"
 
@@ -263,8 +268,7 @@ async def worker_prices_info(callback: CallbackQuery):
     if not admin_only(callback.from_user.id):
         return
     worker_id = int(callback.data.split("_", 1)[1])
-    username = await get_username_by_id(worker_id)
-    label = f"@{username}" if username else str(worker_id)
+    label = await get_user_display_name(worker_id)
     prices = await get_worker_prices(worker_id)
     services = await get_worker_services(worker_id)
     lines = [f"{Style.PRICE} <b>Цены скупа:</b> <code>{label}</code>", ""]
@@ -287,8 +291,7 @@ async def remove_worker_cb(callback: CallbackQuery, bot: Bot):
     if not admin_only(callback.from_user.id):
         return
     worker_id = int(callback.data.split("_", 1)[1])
-    username = await get_username_by_id(worker_id)
-    label = f"@{username}" if username else str(worker_id)
+    label = await get_user_display_name(worker_id)
     await remove_worker(worker_id)
     try:
         await bot.send_message(worker_id, f"{Style.CROSS} Вы удалены из списка скупов.")
@@ -305,8 +308,7 @@ async def set_services_start(callback: CallbackQuery, state: FSMContext):
     if not admin_only(callback.from_user.id):
         return
     worker_id = int(callback.data.split("_", 1)[1])
-    username = await get_username_by_id(worker_id)
-    label = f"@{username}" if username else str(worker_id)
+    label = await get_user_display_name(worker_id)
     current = await get_worker_services(worker_id)
     current_str = ", ".join(current) if current else "не назначены"
     await state.set_state(AdminState.removing_worker_services)
@@ -332,8 +334,7 @@ async def set_services_input(message: Message, state: FSMContext, bot: Bot):
         return
     data = await state.get_data()
     worker_id = data["target_worker_id"]
-    username = await get_username_by_id(worker_id)
-    label = f"@{username}" if username else str(worker_id)
+    label = await get_user_display_name(worker_id)
     all_services = await get_all_services()
     raw = [s.strip() for s in message.text.split(",")]
     valid = [s for s in raw if s in all_services]
@@ -556,9 +557,8 @@ async def show_worker_balance(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     rows = []
     for wid in await get_all_workers():
-        username = await get_username_by_id(wid)
+        label = await get_user_display_name(wid)
         balance = await get_user_balance(wid)
-        label = f"@{username}" if username else str(wid)
         rows.append([InlineKeyboardButton(
             text=f"{Style.WORKER} {label}: {balance} $",
             callback_data=f"workerbal_{wid}"
@@ -630,8 +630,7 @@ async def show_withdrawals(callback: CallbackQuery, state: FSMContext):
     lines = [f"{Style.WITHDRAW} <b>Заявки на выплаты:</b>\n"]
     kb_rows = []
     for wid, user_id, amount, details, status in rows:
-        username = await get_username_by_id(user_id)
-        user_label = f"@{username}" if username else str(user_id)
+        user_label = await get_user_display_name(user_id)
         status_text = f"{Style.SUCCESS} ОПЛАЧЕНА" if status == 'paid' else f"{Style.CLOCK} НЕ ОПЛАЧЕНА"
         lines.append(f"#{wid} | {user_label} | {amount} $ | {status_text}")
         kb_rows.append([InlineKeyboardButton(
@@ -658,8 +657,7 @@ async def withdrawal_detail(callback: CallbackQuery, state: FSMContext):
         await callback.answer(f"{Style.CROSS} Заявка не найдена")
         return
     wid, user_id, amount, details, status = row
-    username = await get_username_by_id(user_id)
-    user_label = f"@{username}" if username else str(user_id)
+    user_label = await get_user_display_name(user_id)
     status_text = f"{Style.SUCCESS} ОПЛАЧЕНА" if status == 'paid' else f"{Style.CLOCK} НЕ ОПЛАЧЕНА"
     text = (
         f"{Style.WITHDRAW} <b>Заявка #{wid}</b>\n\n"
@@ -1166,9 +1164,10 @@ async def _execute_safe_intent(message: Message, intent: str, params: dict, expl
         workers = await get_all_workers()
         lines.append(f"{Style.WORKER} <b>Скупы:</b>")
         for wid in workers:
-            username = await get_username_by_id(wid)
+            label = await get_user_display_name(wid)
             services = await get_worker_services(wid)
-            label = f"@{username}" if username else str(wid)
+        else:
+            label = f"ID: {wid}"
             svc_str = ", ".join(services) if services else "нет сервисов"
             lines.append(f"  {Style.WORKER} {label} — {svc_str}")
 
@@ -1188,8 +1187,7 @@ async def _execute_safe_intent(message: Message, intent: str, params: dict, expl
             lines.append(f"  {Style.INFO} Пока нет заявок")
         else:
             for wid, uid, amount, details, status in rows[:10]:
-                username = await get_username_by_id(uid)
-                user_label = f"@{username}" if username else str(uid)
+                user_label = await get_user_display_name(uid)
                 status_icon = f"{Style.SUCCESS} ОПЛ" if status == 'paid' else f"{Style.CLOCK} ЖДЁТ"
                 lines.append(f"  #{wid} | {user_label} | {amount}$ | {status_icon}")
 
@@ -1226,9 +1224,10 @@ async def _execute_safe_intent(message: Message, intent: str, params: dict, expl
         workers = await get_all_workers()
         lines.append(f"{Style.PRICE} <b>Цены скупов:</b>")
         for wid in workers:
-            username = await get_username_by_id(wid)
+            label = await get_user_display_name(wid)
             prices = await get_worker_prices(wid)
-            label = f"@{username}" if username else str(wid)
+        else:
+            label = f"ID: {wid}"
             if prices:
                 price_str = ", ".join([f"{s}:{p}$" for s, p in prices.items()])
                 lines.append(f"  {Style.WORKER} {label}: {price_str}")
@@ -1239,9 +1238,10 @@ async def _execute_safe_intent(message: Message, intent: str, params: dict, expl
         workers = await get_all_workers()
         lines.append(f"{Style.BALANCE} <b>Баланс скупов:</b>")
         for wid in workers:
-            username = await get_username_by_id(wid)
+            label = await get_user_display_name(wid)
             balance = await get_user_balance(wid)
-            label = f"@{username}" if username else str(wid)
+        else:
+            label = f"ID: {wid}"
             lines.append(f"  {Style.WORKER} {label}: <code>{balance}$</code>")
 
     else:

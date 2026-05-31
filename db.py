@@ -14,6 +14,8 @@ async def init_db(seed_worker_ids=None):
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
+                first_name TEXT,
+                last_name TEXT,
                 balance REAL DEFAULT 0,
                 order_limit INTEGER DEFAULT 5,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -107,12 +109,15 @@ async def init_db(seed_worker_ids=None):
             await db.commit()
 
 
-async def upsert_user(user_id: int, username: str = None):
+async def upsert_user(user_id: int, username: str = None, first_name: str = None, last_name: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            """INSERT INTO users (user_id, username) VALUES (?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET username=excluded.username""",
-            (user_id, username)
+            """INSERT INTO users (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET 
+                    username=COALESCE(excluded.username, users.username),
+                    first_name=COALESCE(excluded.first_name, users.first_name),
+                    last_name=COALESCE(excluded.last_name, users.last_name)""",
+            (user_id, username, first_name, last_name)
         )
         await db.commit()
 
@@ -530,13 +535,52 @@ async def get_admin_contacts(admin_ids: list) -> list:
     return contacts
 
 
+
+
+async def get_user_display_name(user_id: int, username: str = None, first_name: str = None, last_name: str = None) -> str:
+    """Get a human-readable display name for a user.
+
+    Priority:
+    1. Telegram username with @
+    2. First + Last name
+    3. Database username with @
+    4. ID as fallback
+    """
+    if username:
+        return f"@{username}"
+
+    full_name = f"{first_name or ''} {last_name or ''}".strip()
+    if full_name:
+        return full_name
+
+    db_username = await get_username_by_id(user_id)
+    if db_username:
+        if " " in db_username:
+            return db_username
+        return f"@{db_username}"
+
+    return f"ID: {user_id}"
+
 async def get_username_by_id(user_id: int) -> str:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT username FROM users WHERE user_id = ?", (user_id,)
+            "SELECT username, first_name, last_name FROM users WHERE user_id = ?", (user_id,)
         )
         row = await cursor.fetchone()
-        return row[0] if row else None
+        if not row:
+            return None
+        username, first_name, last_name = row
+        if username:
+            return username
+        # Build display name from first_name + last_name
+        name_parts = []
+        if first_name:
+            name_parts.append(first_name)
+        if last_name:
+            name_parts.append(last_name)
+        if name_parts:
+            return " ".join(name_parts)
+        return None
 
 
 async def get_user_id_by_username(username: str) -> int:

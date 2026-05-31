@@ -48,6 +48,7 @@ from db import (
     get_main_services,
     get_other_services,
     get_username_by_id,
+    get_user_display_name,
     get_user_withdrawals,
     get_user_limit,
     increment_user_limit,
@@ -276,7 +277,7 @@ async def build_other_services_kb() -> InlineKeyboardMarkup:
 
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
-    await upsert_user(message.from_user.id, message.from_user.username)
+    await upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name, message.from_user.last_name)
     await state.clear()
 
     if message.from_user.id in ADMINS:
@@ -368,8 +369,12 @@ async def worker_balance(message: Message, state: FSMContext):
 async def profile_menu(message: Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
-    username = await get_username_by_id(uid)
-    user_label = f"@{username}" if username else str(uid)
+    user_label = await get_user_display_name(
+        uid, 
+        message.from_user.username, 
+        message.from_user.first_name, 
+        message.from_user.last_name
+    )
     balance = await get_user_balance(uid)
 
     if await is_worker(uid):
