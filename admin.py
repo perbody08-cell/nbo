@@ -1207,8 +1207,7 @@ async def _execute_safe_intent(message: Message, intent: str, params: dict, expl
             price = prices.get(svc, 0)
             status = f"{Style.SUCCESS} активен" if svc in active_services else f"{Style.CLOCK} нет скупов"
             lines.append(f"  {Style.PHONE} {svc}: <code>{price}$</code> ({status})")
-        lines.append(f"
-{Style.INFO} Всего: {len(services)} сервисов, активных: {len(active_services)}")
+        lines.append(f"{Style.INFO} Всего: {len(services)} сервисов, активных: {len(active_services)}")
 
     elif intent == "show_bonuses":
         prices = await get_all_service_prices()
