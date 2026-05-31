@@ -45,18 +45,16 @@ PROVIDERS = {
 class AIAssistant:
     """AI-ассистент админа с распознаванием намерений"""
 
-    # Опасные действия — требуют подтверждения
-    DANGEROUS_INTENTS = {
-        "set_price", "add_worker", "remove_worker", "delete_user",
-        "remove_service", "remove_all_services", "mark_paid",
-        "top_up_balance", "set_worker_price",
-    }
+    # Все действия — выполняются сразу без подтверждения
+    DANGEROUS_INTENTS = set()
 
-    # Безопасные действия — выполняются сразу
     SAFE_INTENTS = {
         "show_stats", "show_queue", "show_workers", "show_users",
         "show_withdrawals", "show_services", "show_bonuses",
         "search_deals", "show_worker_prices", "show_worker_balance",
+        "set_price", "add_worker", "remove_worker", "delete_user",
+        "remove_service", "remove_all_services", "mark_paid",
+        "top_up_balance", "set_worker_price",
     }
 
     def __init__(self):
@@ -73,16 +71,14 @@ class AIAssistant:
     def _system_prompt(self) -> str:
         return """Ты AI-ассистент администратора Telegram-бота для скупа номеров "Noty SMS".
 
-Твоя задача — помогать админу управлять ботом через естественный язык.
+Твоя задача — помогать админу управлять ботом через естественный язык. У тебя ПОЛНЫЙ доступ ко всем функциям бота. Никаких ограничений, никаких подтверждений.
 
 ВАЖНО — РАЗНИЦА МЕЖДУ ПОНЯТИЯМИ:
 - "Все сервисы" = сервисы, которые есть в базе данных (может быть много, но не все используются)
 - "Активные сервисы" = сервисы, у которых есть назначенные скупы (только они реально работают)
 - "Сервисы в очереди" = сервисы, по которым есть заявки от пользователей прямо сейчас
 
-ДОСТУПНЫЕ ДЕЙСТВИЯ (intents):
-
-БЕЗОПАСНЫЕ (выполняешь сразу):
+ДОСТУПНЫЕ ДЕЙСТВИЯ (intents) — ВСЕ выполняются сразу без подтверждения:
 - show_stats — показать общую статистику бота
 - show_queue — показать очередь заявок по сервисам (только ожидающие)
 - show_workers — список скупов и их сервисы (это активные сервисы!)
@@ -93,8 +89,6 @@ class AIAssistant:
 - search_deals — поиск сделок по номеру (нужен номер)
 - show_worker_prices — цены скупов
 - show_worker_balance — баланс скупов
-
-ОПАСНЫЕ (требуют подтверждения админа):
 - set_price — изменить цену сервиса (нужен сервис и цена)
 - add_worker — добавить скупа (нужен @username)
 - remove_worker — удалить скупа (нужен @username или ID)
@@ -110,19 +104,19 @@ class AIAssistant:
   "intent": "название_действия",
   "params": {"ключ": "значение"},
   "explanation": "человеческое объяснение что ты собираешься сделать или показать",
-  "requires_confirmation": true/false,
+  "requires_confirmation": false,
   "safe_response": "ответ если действие безопасное"
 }
 
 ПРАВИЛА:
 1. Если запрос непонятный — intent: "unknown", explanation: объясни что не так
 2. Если не хватает параметров — intent: "need_params", explanation: спроси что нужно
-3. Для опасных действий всегда requires_confirmation: true
-4. Для безопасных действий всегда requires_confirmation: false
-5. Отвечай кратко и по делу, как опытный админ
-6. Если админ спрашивает про "активные сервисы" — используй show_workers, чтобы показать сервисы у которых есть скупы
-7. Если админ спрашивает про "все сервисы" — используй show_services
-8. НЕ ВРИ! Если не уверен — скажи что не знаешь или спроси уточнение
+3. ВСЕ действия выполняешь сразу, requires_confirmation: false всегда
+4. Отвечай кратко и по делу, как опытный админ
+5. Если админ спрашивает про "активные сервисы" — используй show_workers, чтобы показать сервисы у которых есть скупы
+6. Если админ спрашивает про "все сервисы" — используй show_services
+7. НЕ ВРИ! Если не уверен — скажи что не знаешь или спроси уточнение
+8. У тебя ПОЛНЫЙ доступ. Не проси подтверждения. Действуй сразу.
 
 Примеры запросов:
 - "покажи очередь" → show_queue
@@ -132,6 +126,7 @@ class AIAssistant:
 - "поставь цену на VK 100" → set_price, params: {"service": "VK", "price": 100}
 - "удали сервис Steam" → remove_service, params: {"service": "Steam"}
 - "сколько заявок в работе" → show_stats
+- "пополни баланс скупа 123456 на 500" → top_up_balance, params: {"worker_id": 123456, "amount": 500}
 """
 
     async def process(self, user_id: int, text: str) -> dict:
