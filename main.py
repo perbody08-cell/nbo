@@ -10,6 +10,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    FSInputFile,
 )
 from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -64,62 +65,54 @@ dp.include_router(admin_module.router)
 _active_timers: set = set()
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  DESIGN SYSTEM — Единый стиль всех кнопок
-# ═══════════════════════════════════════════════════════════════════════════
-
 class Style:
-    """Цветовая палитра и эмодзи дизайн-системы"""
-    PRIMARY   = "\U0001f535"   # Главные действия
-    SUCCESS   = "\U0001f7e2"   # Успех, принять
-    DANGER    = "\U0001f534"   # Опасность, отклонить
-    WARNING   = "\U0001f7e1"   # Предупреждения
-    INFO      = "\U0001f537"   # Информация
-    MONEY     = "\U0001f4b0"   # Финансы
-    USER      = "\U0001f464"   # Пользователь
-    WORKER    = "\U0001f477"   # Скуп
-    ADMIN     = "\U0001f451"   # Админ
-    PHONE     = "\U0001f4f1"   # Номер
-    CODE      = "\U0001f511"   # Код
-    ORDER     = "\U0001f4cb"   # Заявка
-    QUEUE     = "\U0001f4ca"   # Очередь
-    BACK      = "\U000025c0\U0000fe0f"   # Назад
-    HOME      = "\U0001f3e0"   # Главная
-    SUPPORT   = "\U0001f198"   # Поддержка
-    PROFILE   = "\U0001f464"   # Профиль
-    WITHDRAW  = "\U0001f4b8"   # Вывод
-    ACTIVE    = "\U0001f4cb"   # Активные
-    HISTORY   = "\U0001f550"   # История
-    SETTINGS  = "\U00002699\U0000fe0f"   # Настройки
-    ADD       = "\U00002795"   # Добавить
-    REMOVE    = "\U0001f5d1\U0000fe0f"  # Удалить
-    EDIT      = "\U0000270f\U0000fe0f"   # Изменить
-    SEARCH    = "\U0001f50d"   # Поиск
-    BONUS     = "\U0001f381"   # Бонус
-    PRICE     = "\U0001f3f7\U0000fe0f"   # Цена
-    BALANCE   = "\U0001f4b3"   # Баланс
-    SERVICES  = "\U0001f9e9"   # Сервисы
-    STATS     = "\U0001f4c8"   # Статистика
-    STAR      = "\U00002b50"   # Звезда
-    ARROW_R   = "\U000025b6\U0000fe0f"   # Вперёд
-    ARROW_L   = "\U000025c0\U0000fe0f"   # Назад
-    CHECK     = "\U00002705"   # Галочка
-    CROSS     = "\U0000274c"   # Крестик
-    REFRESH   = "\U0001f504"   # Обновить
-    BELL      = "\U0001f514"   # Уведомление
-    CLOCK     = "\U000023f0"   # Время
-    CHAT      = "\U0001f4ac"   # Комментарий
-    DOC       = "\U0001f4c4"   # Документ
-    PIN       = "\U0001f4cc"   # Закрепить
-    FIRE      = "\U0001f525"   # Горячее
-    CROWN     = "\U0001f451"   # Корона
-    GEM       = "\U0001f48e"   # Алмаз
+    PRIMARY   = "\U0001f535"
+    SUCCESS   = "\U0001f7e2"
+    DANGER    = "\U0001f534"
+    WARNING   = "\U0001f7e1"
+    INFO      = "\U0001f537"
+    MONEY     = "\U0001f4b0"
+    USER      = "\U0001f464"
+    WORKER    = "\U0001f477"
+    ADMIN     = "\U0001f451"
+    PHONE     = "\U0001f4f1"
+    CODE      = "\U0001f511"
+    ORDER     = "\U0001f4cb"
+    QUEUE     = "\U0001f4ca"
+    BACK      = "\U000025c0\U0000fe0f"
+    HOME      = "\U0001f3e0"
+    SUPPORT   = "\U0001f198"
+    PROFILE   = "\U0001f464"
+    WITHDRAW  = "\U0001f4b8"
+    ACTIVE    = "\U0001f4cb"
+    HISTORY   = "\U0001f550"
+    SETTINGS  = "\U00002699\U0000fe0f"
+    ADD       = "\U00002795"
+    REMOVE    = "\U0001f5d1\U0000fe0f"
+    EDIT      = "\U0000270f\U0000fe0f"
+    SEARCH    = "\U0001f50d"
+    BONUS     = "\U0001f381"
+    PRICE     = "\U0001f3f7\U0000fe0f"
+    BALANCE   = "\U0001f4b3"
+    SERVICES  = "\U0001f9e9"
+    STATS     = "\U0001f4c8"
+    STAR      = "\U00002b50"
+    ARROW_R   = "\U000025b6\U0000fe0f"
+    ARROW_L   = "\U000025c0\U0000fe0f"
+    CHECK     = "\U00002705"
+    CROSS     = "\U0000274c"
+    REFRESH   = "\U0001f504"
+    BELL      = "\U0001f514"
+    CLOCK     = "\U000023f0"
+    CHAT      = "\U0001f4ac"
+    DOC       = "\U0001f4c4"
+    PIN       = "\U0001f4cc"
+    FIRE      = "\U0001f525"
+    CROWN     = "\U0001f451"
+    GEM       = "\U0001f48e"
 
-
-# ─── Reply Keyboards ──────────────────────────────────────────────────────
 
 def main_menu_kb() -> ReplyKeyboardMarkup:
-    """Главное меню пользователя"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -144,7 +137,6 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
 
 
 def worker_menu_kb() -> ReplyKeyboardMarkup:
-    """Меню скупа (воркера)"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=f"{Style.QUEUE} Очередь заявок")],
@@ -157,7 +149,6 @@ def worker_menu_kb() -> ReplyKeyboardMarkup:
 
 
 def admin_start_kb() -> ReplyKeyboardMarkup:
-    """Клавиатура админа при старте"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=f"{Style.ADMIN} Админ-панель")],
@@ -165,8 +156,6 @@ def admin_start_kb() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
     )
 
-
-# ─── Inline Keyboards ─────────────────────────────────────────────────────
 
 def back_kb(callback_data: str = "back_to_services") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -201,7 +190,6 @@ def take_order_kb(order_id: int) -> InlineKeyboardMarkup:
 
 
 def worker_action_kb(order_id: int) -> InlineKeyboardMarkup:
-    """Кнопки для скупа: принять/запросить повтор"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -215,8 +203,6 @@ def worker_action_kb(order_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
-
-# ─── Helpers ────────────────────────────────────────────────────────────────
 
 def not_admin(message: Message) -> bool:
     return message.from_user.id not in ADMINS
@@ -232,10 +218,6 @@ STATUS_LABELS = {
     "rejected": f"{Style.DANGER} Отклонена",
 }
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  SERVICE SELECTION KEYBOARDS
-# ═══════════════════════════════════════════════════════════════════════════
 
 async def build_services_kb() -> InlineKeyboardMarkup:
     rows = []
@@ -274,10 +256,6 @@ async def build_other_services_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  START COMMAND
-# ═══════════════════════════════════════════════════════════════════════════
-
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await upsert_user(message.from_user.id, message.from_user.username)
@@ -313,24 +291,18 @@ async def start(message: Message, state: FSMContext):
         return
 
     balance = await get_user_balance(message.from_user.id)
-    # Отправляем аватарку бота с приветствием
-    from aiogram.types import FSInputFile
     avatar = FSInputFile("bot_avatar.jpg")
     await message.answer_photo(
         photo=avatar,
         caption=
         f"{Style.GEM} <b>Добро пожаловать в Noty SMS!</b>\n\n"
         f"{Style.MONEY} Ваш баланс: <code>{balance} $</code>\n"
-        f"{Style.INFO} Work Empire — надёжный скуп номеров\n\n"
+        f"{Style.INFO} Work Empire — надежный скуп номеров\n\n"
         f"Выберите нужный раздел в меню ниже.",
         reply_markup=main_menu_kb(),
         parse_mode="HTML",
     )
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  WORKER MENU
-# ═══════════════════════════════════════════════════════════════════════════
 
 @dp.message(F.text.contains("Очередь заявок"))
 async def worker_queue(message: Message, state: FSMContext):
@@ -389,7 +361,7 @@ async def profile_menu(message: Message, state: FSMContext):
             f"{Style.USER} Юзернейм: <code>{user_label}</code>\n"
             f"{Style.MONEY} Баланс: <code>{balance} $</code>\n\n"
             f"{Style.STATS} <b>Статистика:</b>\n"
-            f"  {Style.CHECK} Принято за всё время: <b>{stats['total_accepted']}</b>\n"
+            f"  {Style.CHECK} Принято за все время: <b>{stats['total_accepted']}</b>\n"
             f"  {Style.FIRE} За сегодня: <b>{stats['today']}</b>"
         )
         await message.answer(text, reply_markup=worker_menu_kb(), parse_mode="HTML")
@@ -409,10 +381,6 @@ async def profile_menu(message: Message, state: FSMContext):
         )
         await message.answer(text, reply_markup=main_menu_kb(), parse_mode="HTML")
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  WITHDRAWAL
-# ═══════════════════════════════════════════════════════════════════════════
 
 @dp.message(F.text.contains("Выплата"))
 async def withdrawal_start(message: Message, state: FSMContext):
@@ -443,7 +411,7 @@ async def withdrawal_start(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "cancel_withdrawal")
 async def cancel_withdrawal(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text(f"{Style.CROSS} Вывод отменён.")
+    await callback.message.edit_text(f"{Style.CROSS} Вывод отменен.")
     await callback.answer()
 
 
@@ -477,10 +445,6 @@ async def withdrawal_input(message: Message, state: FSMContext):
         reply_markup=main_menu_kb(),
     )
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  MAIN MENU BUTTONS
-# ═══════════════════════════════════════════════════════════════════════════
 
 @dp.message(F.text.contains("Сдать номер"))
 async def submit_number_menu(message: Message, state: FSMContext):
@@ -540,7 +504,7 @@ async def past_orders_menu(message: Message, state: FSMContext):
     orders = await get_user_orders_past(message.from_user.id)
     if not orders:
         await message.answer(
-            f"{Style.INFO} У вас нет завершённых заявок.",
+            f"{Style.INFO} У вас нет завершенных заявок.",
             reply_markup=main_menu_kb(),
         )
         return
@@ -573,10 +537,6 @@ async def my_withdrawals_menu(message: Message, state: FSMContext):
         )
     await message.answer("\n".join(lines), reply_markup=main_menu_kb(), parse_mode="HTML")
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  SERVICE SELECTION CALLBACKS
-# ═══════════════════════════════════════════════════════════════════════════
 
 @dp.callback_query(F.data.startswith("service_"))
 async def choose_service(callback: CallbackQuery, state: FSMContext):
@@ -634,10 +594,6 @@ async def back_to_services(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  NUMBER ENTRY
-# ═══════════════════════════════════════════════════════════════════════════
 
 @dp.message(OrderState.entering_number)
 async def enter_number(message: Message, state: FSMContext):
@@ -727,10 +683,6 @@ async def enter_number(message: Message, state: FSMContext):
     await state.clear()
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  WORKER: TAKE ORDER
-# ═══════════════════════════════════════════════════════════════════════════
-
 @dp.callback_query(F.data.startswith("take_"))
 async def take_order_handler(callback: CallbackQuery):
     if not await is_worker(callback.from_user.id):
@@ -757,7 +709,6 @@ async def take_order_handler(callback: CallbackQuery):
     worker_id = callback.from_user.id
     await take_order(order_id, worker_id)
 
-    # Отправляем пользователю запрос кода
     code_request = await bot.send_message(
         order[1],
         f"{Style.SUCCESS} <b>Ваш номер взят в работу!</b>\n\n"
@@ -786,10 +737,6 @@ async def take_order_handler(callback: CallbackQuery):
     _active_timers.add(task)
     task.add_done_callback(_active_timers.discard)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  USER: RECEIVE CODE / COMMENTS
-# ═══════════════════════════════════════════════════════════════════════════
 
 @dp.message(not_admin, ~StateFilter(AdminState))
 async def catch_all(message: Message, state: FSMContext):
@@ -851,7 +798,7 @@ async def catch_all(message: Message, state: FSMContext):
     if not CODE_RE.match(code):
         await message.answer(
             f"{Style.CROSS} Код должен содержать только цифры.\n"
-            f"{Style.CODE} Отправьте ответ на сообщение с просьбой кода ещё раз."
+            f"{Style.CODE} Отправьте ответ на сообщение с просьбой кода еще раз."
         )
         return
 
@@ -883,10 +830,6 @@ async def catch_all(message: Message, state: FSMContext):
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  AUTO-CANCEL TIMER
-# ═══════════════════════════════════════════════════════════════════════════
-
 async def auto_cancel_timer(order_id: int, user_id: int, worker_id: int):
     await asyncio.sleep(120)
     order = await get_order(order_id)
@@ -911,10 +854,6 @@ async def auto_cancel_timer(order_id: int, user_id: int, worker_id: int):
         except Exception:
             pass
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  WORKER: ACCEPT / REJECT
-# ═══════════════════════════════════════════════════════════════════════════
 
 @dp.callback_query(F.data.startswith("accept_"))
 async def accept_handler(callback: CallbackQuery):
@@ -955,7 +894,7 @@ async def accept_handler(callback: CallbackQuery):
     try:
         await bot.send_message(
             callback.from_user.id,
-            f"{Style.BALANCE} Баланс по заявке <b>#{order_id}</b> обновлён.\n"
+            f"{Style.BALANCE} Баланс по заявке <b>#{order_id}</b> обновлен.\n"
             f"{Style.MONEY} Списано: <code>{worker_price} $</code>",
             parse_mode="HTML",
         )
@@ -1006,7 +945,7 @@ async def reject_handler(callback: CallbackQuery):
         user_kb = worker_menu_kb() if await is_worker(user_id) else main_menu_kb()
         code_request = await bot.send_message(
             user_id,
-            f"{Style.WARNING} <b>Код не подошёл</b>\n\n"
+            f"{Style.WARNING} <b>Код не подошел</b>\n\n"
             f"{Style.REFRESH} Скуп запросил повтор кода.\n\n"
             f"{Style.DANGER} Осталась <b>последняя попытка</b>.\n"
             f"{Style.CODE} Отправьте новый код <b>ответом на это сообщение</b>.",
@@ -1026,10 +965,6 @@ async def reject_handler(callback: CallbackQuery):
 
     await callback.answer()
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  MAIN
-# ═══════════════════════════════════════════════════════════════════════════
 
 async def main():
     await init_db(seed_worker_ids=WORKERS)
