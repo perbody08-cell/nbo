@@ -1,231 +1,191 @@
+import os
 import aiosqlite
-from config import SERVICES
+import asyncio
+from typing import Optional
 
-DB_PATH = "orders.db"
+DB_PATH = os.environ.get("DB_PATH", "orders.db")
 
 
-async def init_db(seed_worker_ids: list[int] = None):
+async def init_db(seed_worker_ids=None):
+    """Initialize database tables"""
     async with aiosqlite.connect(DB_PATH) as db:
+        # Users table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                balance REAL DEFAULT 0,
+                order_limit INTEGER DEFAULT 5,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Workers table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS workers (
+                user_id INTEGER PRIMARY KEY,
+                services TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            )
+        """)
+
+        # Orders table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 service TEXT NOT NULL,
                 number TEXT NOT NULL,
                 code TEXT,
-                status TEXT NOT NULL DEFAULT 'waiting',
+                status TEXT DEFAULT 'waiting',
                 worker_id INTEGER,
-                code_count INTEGER NOT NULL DEFAULT 0,
+                code_count INTEGER DEFAULT 0,
                 code_request_msg_id INTEGER,
+                worker_msg_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Services table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS services (
+                name TEXT PRIMARY KEY,
+                price REAL DEFAULT 0,
+                category TEXT DEFAULT 'other'
+            )
+        """)
+
+        # Worker prices table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS worker_prices (
+                worker_id INTEGER,
+                service TEXT,
+                price REAL DEFAULT 0,
+                PRIMARY KEY (worker_id, service)
+            )
+        """)
+
+        # Withdrawals table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                withdrawal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                details TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        try:
-            await db.execute("ALTER TABLE orders ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        except Exception:
-            pass
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS worker_services (
-                worker_id INTEGER NOT NULL,
-                service TEXT NOT NULL,
-                PRIMARY KEY (worker_id, service)
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS workers (
-                worker_id INTEGER PRIMARY KEY
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT
-            )
-        """)
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN order_limit INTEGER NOT NULL DEFAULT 5")
-        except Exception:
-            pass
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS service_prices (
-                service TEXT PRIMARY KEY,
-                price REAL NOT NULL DEFAULT 0
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS worker_prices (
-                worker_id INTEGER NOT NULL,
-                service TEXT NOT NULL,
-                price REAL NOT NULL DEFAULT 0,
-                PRIMARY KEY (worker_id, service)
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS withdrawals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
-                details TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending'
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS service_categories (
-                service TEXT PRIMARY KEY,
-                category TEXT NOT NULL DEFAULT 'other'
-            )
-        """)
+
         await db.commit()
 
-        for col, definition in [
-            ("code_count", "INTEGER NOT NULL DEFAULT 0"),
-            ("code_request_msg_id", "INTEGER"),
-            ("reject_count", "INTEGER NOT NULL DEFAULT 0"),
-            ("worker_msg_id", "INTEGER"),
-        ]:
-            try:
-                await db.execute(
-                    f"ALTER TABLE orders ADD COLUMN {col} {definition}"
-                )
-                await db.commit()
-            except Exception:
-                pass
-
-        try:
-            await db.execute(
-                "ALTER TABLE users ADD COLUMN balance INTEGER NOT NULL DEFAULT 0"
+        # Seed default services if none exist
+        cursor = await db.execute("SELECT COUNT(*) FROM services")
+        count = await cursor.fetchone()
+        if count[0] == 0:
+            default_services = [
+                ("VK", 50, "main"),
+                ("TG", 50, "main"),
+                ("WhatsApp", 40, "main"),
+                ("Steam", 60, "other"),
+                ("OK", 30, "other"),
+            ]
+            await db.executemany(
+                "INSERT INTO services (name, price, category) VALUES (?, ?, ?)",
+                default_services
             )
             await db.commit()
-        except Exception:
-            pass
 
-        try:
-            await db.execute(
-                "ALTER TABLE users ADD COLUMN role TEXT"
-            )
-            await db.commit()
-        except Exception:
-            pass
-
-
+        # Seed workers if provided
         if seed_worker_ids:
             for wid in seed_worker_ids:
                 await db.execute(
-                    "INSERT OR IGNORE INTO workers (worker_id) VALUES (?)",
-                    (wid,)
+                    "INSERT OR IGNORE INTO workers (user_id, services) VALUES (?, ?)",
+                    (wid, "")
                 )
             await db.commit()
 
 
-async def upsert_user(user_id: int, username: str | None):
+async def upsert_user(user_id: int, username: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO users (user_id, username) VALUES (?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET username = excluded.username",
+            """INSERT INTO users (user_id, username) VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET username=excluded.username""",
             (user_id, username)
         )
         await db.commit()
 
 
-async def get_user_id_by_username(username: str) -> int | None:
-    username = username.lstrip("@").lower()
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT user_id FROM users WHERE LOWER(username) = ?",
-            (username,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else None
-
-
-async def get_username_by_id(user_id: int) -> str | None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT username FROM users WHERE user_id = ?", (user_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else None
-
-
-async def get_all_users() -> list[tuple[int, str | None]]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id, username FROM users") as cursor:
-            return await cursor.fetchall()
-
-
-async def delete_user(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-        await db.commit()
-
-
-async def get_all_workers() -> list[int]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT worker_id FROM workers") as cursor:
-            rows = await cursor.fetchall()
-            return [r[0] for r in rows]
-
-
 async def is_worker(user_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT 1 FROM workers WHERE worker_id = ?", (user_id,)
-        ) as cursor:
-            return await cursor.fetchone() is not None
+        cursor = await db.execute(
+            "SELECT 1 FROM workers WHERE user_id = ?", (user_id,)
+        )
+        return await cursor.fetchone() is not None
 
 
-async def add_worker(worker_id: int):
+async def add_worker(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR IGNORE INTO workers (worker_id) VALUES (?)",
-            (worker_id,)
+            "INSERT OR IGNORE INTO workers (user_id, services) VALUES (?, ?)",
+            (user_id, "")
         )
         await db.commit()
 
 
-async def remove_worker(worker_id: int):
+async def remove_worker(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM workers WHERE worker_id = ?", (worker_id,))
-        await db.execute("DELETE FROM worker_services WHERE worker_id = ?", (worker_id,))
-        await db.execute("DELETE FROM worker_prices WHERE worker_id = ?", (worker_id,))
+        await db.execute("DELETE FROM workers WHERE user_id = ?", (user_id,))
         await db.commit()
 
 
-async def set_worker_services(worker_id: int, services: list[str]):
+async def get_all_workers() -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT user_id FROM workers")
+        rows = await cursor.fetchall()
+        return [r[0] for r in rows]
+
+
+async def get_worker_services(user_id: int) -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT services FROM workers WHERE user_id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        if row and row[0]:
+            return [s.strip() for s in row[0].split(",") if s.strip()]
+        return []
+
+
+async def set_worker_services(user_id: int, services: list):
+    services_str = ",".join(services)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "DELETE FROM worker_services WHERE worker_id = ?", (worker_id,)
+            "UPDATE workers SET services = ? WHERE user_id = ?",
+            (services_str, user_id)
         )
-        for service in services:
-            await db.execute(
-                "INSERT OR IGNORE INTO worker_services (worker_id, service) VALUES (?, ?)",
-                (worker_id, service)
-            )
         await db.commit()
 
 
-async def get_worker_services(worker_id: int) -> list[str]:
+async def get_workers_for_service(service: str) -> list:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT service FROM worker_services WHERE worker_id = ?", (worker_id,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [r[0] for r in rows]
-
-
-async def get_workers_for_service(service: str) -> list[int]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT worker_id FROM worker_services WHERE service = ?", (service,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [r[0] for r in rows]
+        cursor = await db.execute("SELECT user_id, services FROM workers")
+        rows = await cursor.fetchall()
+        result = []
+        for wid, services_str in rows:
+            if services_str:
+                svcs = [s.strip() for s in services_str.split(",") if s.strip()]
+                if service in svcs:
+                    result.append(wid)
+        return result
 
 
 async def create_order(user_id: int, service: str, number: str) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "INSERT INTO orders (user_id, service, number, status) VALUES (?, ?, ?, 'waiting')",
+            """INSERT INTO orders (user_id, service, number, status)
+                VALUES (?, ?, ?, 'waiting')""",
             (user_id, service, number)
         )
         await db.commit()
@@ -234,155 +194,18 @@ async def create_order(user_id: int, service: str, number: str) -> int:
 
 async def get_order(order_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, user_id, service, number, code, status, worker_id, code_count, code_request_msg_id, worker_msg_id "
-            "FROM orders WHERE id = ?",
-            (order_id,)
-        ) as cursor:
-            return await cursor.fetchone()
+        cursor = await db.execute(
+            "SELECT * FROM orders WHERE order_id = ?", (order_id,)
+        )
+        return await cursor.fetchone()
 
 
 async def take_order(order_id: int, worker_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE orders SET status = 'active', worker_id = ? WHERE id = ?",
+            """UPDATE orders SET status = 'active', worker_id = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE order_id = ?""",
             (worker_id, order_id)
-        )
-        await db.commit()
-
-
-async def set_worker_msg_id(order_id: int, msg_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE orders SET worker_msg_id = ? WHERE id = ?",
-            (msg_id, order_id)
-        )
-        await db.commit()
-
-
-async def set_code_request_msg_id(order_id: int, msg_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE orders SET code_request_msg_id = ? WHERE id = ?",
-            (msg_id, order_id)
-        )
-        await db.commit()
-
-
-async def get_user_limit(user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            'SELECT order_limit FROM users WHERE user_id = ?', (user_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return int(row[0]) if row and row[0] is not None else 5
-
-
-async def increment_user_limit(user_id: int, amount: int = 3):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET order_limit = order_limit + ? WHERE user_id = ?",
-            (amount, user_id)
-        )
-        await db.commit()
-
-
-async def count_user_orders(user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM orders WHERE user_id = ? AND status NOT IN ('rejected')",
-            (user_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return int(row[0]) if row else 0
-
-
-async def get_user_active_order(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, user_id, service, number, code, status, worker_id, code_count, code_request_msg_id, worker_msg_id "
-            "FROM orders WHERE user_id = ? AND status = 'active'",
-            (user_id,)
-        ) as cursor:
-            return await cursor.fetchone()
-
-
-async def get_user_orders_active(user_id: int) -> list[tuple]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, service, number, status FROM orders "
-            "WHERE user_id = ? AND status IN ('waiting', 'active') ORDER BY id DESC",
-            (user_id,)
-        ) as cursor:
-            return await cursor.fetchall()
-
-
-async def get_user_orders_past(user_id: int) -> list[tuple]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, service, number, status FROM orders "
-            "WHERE user_id = ? AND status IN ('accepted', 'rejected') ORDER BY id DESC LIMIT 20",
-            (user_id,)
-        ) as cursor:
-            return await cursor.fetchall()
-
-
-async def get_user_stats(user_id: int) -> dict:
-    async with aiosqlite.connect(DB_PATH) as db:
-        today = "date('now')"
-        total = await db.execute(
-            "SELECT COUNT(*) FROM orders WHERE user_id = ? AND status NOT IN ('rejected')", (user_id,)
-        )
-        total_val = int((await total.fetchone())[0])
-
-        active = await db.execute(
-            "SELECT COUNT(*) FROM orders WHERE user_id = ? AND status IN ('waiting','active')", (user_id,)
-        )
-        active_val = int((await active.fetchone())[0])
-
-        accepted = await db.execute(
-            "SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'accepted'", (user_id,)
-        )
-        accepted_val = int((await accepted.fetchone())[0])
-
-        today_cnt = await db.execute(
-            f"SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'accepted' AND date(created_at) = {today}", (user_id,)
-        )
-        today_val = int((await today_cnt.fetchone())[0])
-
-        return {"total": total_val, "active": active_val, "accepted": accepted_val, "today": today_val}
-
-
-async def get_worker_stats(worker_id: int) -> dict:
-    async with aiosqlite.connect(DB_PATH) as db:
-        today = "date('now')"
-        total = await db.execute(
-            "SELECT COUNT(*) FROM orders WHERE worker_id = ? AND status = 'accepted'", (worker_id,)
-        )
-        total_val = int((await total.fetchone())[0])
-
-        today_cnt = await db.execute(
-            f"SELECT COUNT(*) FROM orders WHERE worker_id = ? AND status = 'accepted' AND date(created_at) = {today}", (worker_id,)
-        )
-        today_val = int((await today_cnt.fetchone())[0])
-
-        return {"total_accepted": total_val, "today": today_val}
-
-
-async def get_code_count(order_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT code_count FROM orders WHERE id = ?", (order_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
-
-
-async def save_code(order_id: int, code: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE orders SET code = ?, code_count = code_count + 1 WHERE id = ?",
-            (code, order_id)
         )
         await db.commit()
 
@@ -390,7 +213,9 @@ async def save_code(order_id: int, code: str):
 async def accept_order(order_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE orders SET status = 'accepted' WHERE id = ?", (order_id,)
+            """UPDATE orders SET status = 'accepted', updated_at = CURRENT_TIMESTAMP
+                WHERE order_id = ?""",
+            (order_id,)
         )
         await db.commit()
 
@@ -398,39 +223,134 @@ async def accept_order(order_id: int):
 async def reject_order(order_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE orders SET status = 'rejected' WHERE id = ?", (order_id,)
+            """UPDATE orders SET status = 'rejected', updated_at = CURRENT_TIMESTAMP
+                WHERE order_id = ?""",
+            (order_id,)
         )
         await db.commit()
+
+
+async def save_code(order_id: int, code: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """UPDATE orders SET code = ?, code_count = code_count + 1, updated_at = CURRENT_TIMESTAMP
+                WHERE order_id = ?""",
+            (code, order_id)
+        )
+        await db.commit()
+
+
+async def get_code_count(order_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT code_count FROM orders WHERE order_id = ?", (order_id,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
 
 
 async def increment_reject_count(order_id: int) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE orders SET reject_count = reject_count + 1 WHERE id = ?",
+            "UPDATE orders SET code_count = code_count + 1 WHERE order_id = ?",
             (order_id,)
         )
         await db.commit()
-        async with db.execute(
-            "SELECT reject_count FROM orders WHERE id = ?", (order_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
+        cursor = await db.execute(
+            "SELECT code_count FROM orders WHERE order_id = ?", (order_id,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def set_code_request_msg_id(order_id: int, msg_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE orders SET code_request_msg_id = ? WHERE order_id = ?",
+            (msg_id, order_id)
+        )
+        await db.commit()
+
+
+async def set_worker_msg_id(order_id: int, msg_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE orders SET worker_msg_id = ? WHERE order_id = ?",
+            (msg_id, order_id)
+        )
+        await db.commit()
+
+
+async def get_user_active_order(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """SELECT * FROM orders 
+                WHERE user_id = ? AND status IN ('active', 'waiting')
+                ORDER BY created_at DESC LIMIT 1""",
+            (user_id,)
+        )
+        return await cursor.fetchone()
+
+
+async def get_user_orders_active(user_id: int) -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """SELECT order_id, service, number, status FROM orders
+                WHERE user_id = ? AND status IN ('active', 'waiting')
+                ORDER BY created_at DESC""",
+            (user_id,)
+        )
+        return await cursor.fetchall()
+
+
+async def get_user_orders_past(user_id: int) -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """SELECT order_id, service, number, status FROM orders
+                WHERE user_id = ? AND status IN ('accepted', 'rejected')
+                ORDER BY created_at DESC""",
+            (user_id,)
+        )
+        return await cursor.fetchall()
+
+
+async def count_user_orders(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM orders WHERE user_id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        return row[0]
+
+
+async def get_available_orders(worker_id: int) -> list:
+    services = await get_worker_services(worker_id)
+    if not services:
+        return []
+    placeholders = ",".join("?" * len(services))
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            f"""SELECT order_id, user_id, service, number FROM orders
+                WHERE status = 'waiting' AND service IN ({placeholders})
+                ORDER BY created_at ASC""",
+            services
+        )
+        return await cursor.fetchall()
 
 
 async def get_service_price(service: str) -> float:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT price FROM service_prices WHERE service = ?", (service,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
+        cursor = await db.execute(
+            "SELECT price FROM services WHERE name = ?", (service,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
 
 
 async def set_service_price(service: str, price: float):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO service_prices (service, price) VALUES (?, ?) "
-            "ON CONFLICT(service) DO UPDATE SET price = excluded.price",
+            "INSERT INTO services (name, price) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET price=excluded.price",
             (service, price)
         )
         await db.commit()
@@ -438,26 +358,26 @@ async def set_service_price(service: str, price: float):
 
 async def get_all_service_prices() -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT service, price FROM service_prices") as cursor:
-            rows = await cursor.fetchall()
-            return {r[0]: r[1] for r in rows}
+        cursor = await db.execute("SELECT name, price FROM services")
+        rows = await cursor.fetchall()
+        return {r[0]: r[1] for r in rows}
 
 
-async def get_worker_price(worker_id: int, service: str) -> float | None:
+async def get_worker_price(worker_id: int, service: str) -> float:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
+        cursor = await db.execute(
             "SELECT price FROM worker_prices WHERE worker_id = ? AND service = ?",
             (worker_id, service)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else None
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
 
 
 async def set_worker_price(worker_id: int, service: str, price: float):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO worker_prices (worker_id, service, price) VALUES (?, ?, ?) "
-            "ON CONFLICT(worker_id, service) DO UPDATE SET price = excluded.price",
+            """INSERT INTO worker_prices (worker_id, service, price) VALUES (?, ?, ?)
+                ON CONFLICT(worker_id, service) DO UPDATE SET price=excluded.price""",
             (worker_id, service, price)
         )
         await db.commit()
@@ -465,24 +385,24 @@ async def set_worker_price(worker_id: int, service: str, price: float):
 
 async def get_worker_prices(worker_id: int) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
+        cursor = await db.execute(
             "SELECT service, price FROM worker_prices WHERE worker_id = ?",
             (worker_id,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return {r[0]: r[1] for r in rows}
+        )
+        rows = await cursor.fetchall()
+        return {r[0]: r[1] for r in rows}
 
 
-async def get_user_balance(user_id: int) -> int:
+async def get_user_balance(user_id: int) -> float:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
+        cursor = await db.execute(
             "SELECT balance FROM users WHERE user_id = ?", (user_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
 
 
-async def add_user_balance(user_id: int, amount: int):
+async def add_user_balance(user_id: int, amount: float):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET balance = balance + ? WHERE user_id = ?",
@@ -491,202 +411,281 @@ async def add_user_balance(user_id: int, amount: int):
         await db.commit()
 
 
-async def set_user_balance(user_id: int, amount: int):
+async def set_user_balance(user_id: int, balance: float):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET balance = ? WHERE user_id = ?",
+            (balance, user_id)
+        )
+        await db.commit()
+
+
+async def get_user_limit(user_id: int) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT order_limit FROM users WHERE user_id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 5
+
+
+async def increment_user_limit(user_id: int, amount: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET order_limit = order_limit + ? WHERE user_id = ?",
             (amount, user_id)
+        )
+        await db.commit()
+
+
+async def create_withdrawal(user_id: int, amount: float, details: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """INSERT INTO withdrawals (user_id, amount, details)
+                VALUES (?, ?, ?)""",
+            (user_id, amount, details)
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_user_withdrawals(user_id: int) -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """SELECT withdrawal_id, amount, details, status FROM withdrawals
+                WHERE user_id = ? ORDER BY created_at DESC""",
+            (user_id,)
+        )
+        return await cursor.fetchall()
+
+
+async def get_pending_withdrawals() -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """SELECT * FROM withdrawals WHERE status = 'pending' ORDER BY created_at DESC"""
+        )
+        return await cursor.fetchall()
+
+
+async def get_all_withdrawals() -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """SELECT withdrawal_id, user_id, amount, details, status FROM withdrawals
+                ORDER BY created_at DESC"""
+        )
+        return await cursor.fetchall()
+
+
+async def get_withdrawal(withdrawal_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT * FROM withdrawals WHERE withdrawal_id = ?", (withdrawal_id,)
+        )
+        return await cursor.fetchone()
+
+
+async def mark_withdrawal_paid(withdrawal_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE withdrawals SET status = 'paid' WHERE withdrawal_id = ?",
+            (withdrawal_id,)
         )
         await db.commit()
 
 
 async def get_queue_count(service: str) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
+        cursor = await db.execute(
             "SELECT COUNT(*) FROM orders WHERE service = ? AND status = 'waiting'",
             (service,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
+        )
+        row = await cursor.fetchone()
+        return row[0]
 
 
 async def get_queue_position(order_id: int, service: str) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM orders WHERE service = ? AND status = 'waiting' AND id < ?",
+        cursor = await db.execute(
+            """SELECT COUNT(*) FROM orders
+                WHERE service = ? AND status = 'waiting' AND created_at <
+                (SELECT created_at FROM orders WHERE order_id = ?)""",
             (service, order_id)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
-
-
-async def get_admin_contacts(admin_ids: list[int]) -> list[str]:
-    if not admin_ids:
-        return []
-    async with aiosqlite.connect(DB_PATH) as db:
-        placeholders = ",".join("?" * len(admin_ids))
-        async with db.execute(
-            f"SELECT username FROM users WHERE user_id IN ({placeholders}) AND username IS NOT NULL",
-            admin_ids
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [f"@{r[0]}" for r in rows if r[0]]
-
-
-async def get_available_orders(worker_id: int) -> list[tuple]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        services = await db.execute(
-            "SELECT service FROM worker_services WHERE worker_id = ?", (worker_id,)
         )
-        svcs = [r[0] for r in await services.fetchall()]
-        if not svcs:
-            return []
-        placeholders = ",".join("?" * len(svcs))
-        async with db.execute(
-            f"SELECT id, user_id, service, number FROM orders "
-            f"WHERE service IN ({placeholders}) AND status = 'waiting' "
-            f"ORDER BY id DESC LIMIT 50",
-            svcs
-        ) as cursor:
-            return await cursor.fetchall()
+        row = await cursor.fetchone()
+        return (row[0] + 1) if row else 1
 
 
-async def get_orders_by_number(number: str) -> list[tuple]:
-    number_clean = number.lstrip("+")
+async def get_admin_contacts(admin_ids: list) -> list:
+    contacts = []
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, user_id, service, number, code, status, worker_id FROM orders "
-            "WHERE REPLACE(number, '+', '') = ?",
-            (number_clean,)
-        ) as cursor:
-            return await cursor.fetchall()
+        for admin_id in admin_ids:
+            cursor = await db.execute(
+                "SELECT username FROM users WHERE user_id = ?", (admin_id,)
+            )
+            row = await cursor.fetchone()
+            if row and row[0]:
+                contacts.append(f"@{row[0]}")
+            else:
+                contacts.append(str(admin_id))
+    return contacts
 
 
-async def get_all_services() -> list[str]:
+async def get_username_by_id(user_id: int) -> str:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT service FROM service_prices ORDER BY service") as cursor:
-            rows = await cursor.fetchall()
-            return [r[0] for r in rows]
+        cursor = await db.execute(
+            "SELECT username FROM users WHERE user_id = ?", (user_id,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
 
 
-async def get_main_services() -> list[str]:
+async def get_user_id_by_username(username: str) -> int:
+    username = username.lstrip("@")
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT service FROM service_categories WHERE category = 'main' ORDER BY service"
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [r[0] for r in rows]
+        cursor = await db.execute(
+            "SELECT user_id FROM users WHERE username = ?", (username,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
 
 
-async def get_other_services() -> list[str]:
+async def get_all_users() -> list:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT s.service FROM service_prices s LEFT JOIN service_categories c "
-            "ON s.service = c.service WHERE c.category IS NULL OR c.category != 'main' "
-            "ORDER BY s.service"
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [r[0] for r in rows]
+        cursor = await db.execute(
+            "SELECT user_id, username FROM users ORDER BY created_at DESC"
+        )
+        return await cursor.fetchall()
+
+
+async def delete_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+        await db.commit()
+
+
+async def get_all_services() -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT name FROM services ORDER BY name")
+        rows = await cursor.fetchall()
+        return [r[0] for r in rows]
+
+
+async def get_main_services() -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT name FROM services WHERE category = 'main' ORDER BY name"
+        )
+        rows = await cursor.fetchall()
+        return [r[0] for r in rows]
+
+
+async def get_other_services() -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT name FROM services WHERE category = 'other' ORDER BY name"
+        )
+        rows = await cursor.fetchall()
+        return [r[0] for r in rows]
+
+
+async def get_service_category(service: str) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT category FROM services WHERE name = ?", (service,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 'other'
 
 
 async def set_service_category(service: str, category: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO service_categories (service, category) VALUES (?, ?) "
-            "ON CONFLICT(service) DO UPDATE SET category = excluded.category",
-            (service, category)
+            "UPDATE services SET category = ? WHERE name = ?",
+            (category, service)
         )
         await db.commit()
 
 
-async def get_service_category(service: str) -> str:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT category FROM service_categories WHERE service = ?", (service,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 'other'
-
-
-async def add_service(service: str):
+async def add_service(name: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR IGNORE INTO service_prices (service, price) VALUES (?, 0)",
-            (service,)
-        )
-        await db.execute(
-            "INSERT OR IGNORE INTO service_categories (service, category) VALUES (?, 'other')",
-            (service,)
+            "INSERT OR IGNORE INTO services (name) VALUES (?)", (name,)
         )
         await db.commit()
 
 
-async def remove_service(service: str):
+async def remove_service(name: str):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM service_prices WHERE service = ?", (service,))
-        await db.execute("DELETE FROM service_categories WHERE service = ?", (service,))
-        await db.execute("DELETE FROM worker_services WHERE service = ?", (service,))
-        await db.execute("DELETE FROM orders WHERE service = ?", (service,))
-        await db.execute("DELETE FROM worker_prices WHERE service = ?", (service,))
+        await db.execute("DELETE FROM services WHERE name = ?", (name,))
         await db.commit()
 
 
 async def remove_all_services():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM service_prices")
-        await db.execute("DELETE FROM service_categories")
-        await db.execute("DELETE FROM worker_services")
-        await db.execute("DELETE FROM worker_prices")
-        await db.execute("DELETE FROM orders")
+        await db.execute("DELETE FROM services")
         await db.commit()
 
 
-async def create_withdrawal(user_id: int, amount: int, details: str):
+async def get_orders_by_number(number: str) -> list:
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO withdrawals (user_id, amount, details, status) VALUES (?, ?, ?, 'pending')",
-            (user_id, amount, details)
+        cursor = await db.execute(
+            """SELECT order_id, user_id, service, number, code, status, worker_id
+                FROM orders WHERE number = ? ORDER BY created_at DESC""",
+            (number,)
         )
-        await db.commit()
+        return await cursor.fetchall()
 
 
-async def get_user_withdrawals(user_id: int) -> list[tuple]:
+async def get_user_stats(user_id: int) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, amount, details, status FROM withdrawals WHERE user_id = ? ORDER BY id DESC LIMIT 20",
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM orders WHERE user_id = ?", (user_id,)
+        )
+        total = (await cursor.fetchone())[0]
+
+        cursor = await db.execute(
+            """SELECT COUNT(*) FROM orders WHERE user_id = ? AND status IN ('active', 'waiting')""",
             (user_id,)
-        ) as cursor:
-            return await cursor.fetchall()
-
-
-async def get_pending_withdrawals() -> list[tuple]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, user_id, amount, details FROM withdrawals WHERE status = 'pending' ORDER BY id DESC"
-        ) as cursor:
-            return await cursor.fetchall()
-
-
-async def get_all_withdrawals() -> list[tuple]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, user_id, amount, details, status FROM withdrawals ORDER BY id DESC LIMIT 50"
-        ) as cursor:
-            return await cursor.fetchall()
-
-
-async def mark_withdrawal_paid(withdrawal_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE withdrawals SET status = 'paid' WHERE id = ?", (withdrawal_id,)
         )
-        await db.commit()
+        active = (await cursor.fetchone())[0]
+
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'accepted'",
+            (user_id,)
+        )
+        accepted = (await cursor.fetchone())[0]
+
+        cursor = await db.execute(
+            """SELECT COUNT(*) FROM orders WHERE user_id = ? AND status = 'accepted'
+                AND date(created_at) = date('now')""",
+            (user_id,)
+        )
+        today = (await cursor.fetchone())[0]
+
+        return {
+            "total": total,
+            "active": active,
+            "accepted": accepted,
+            "today": today,
+        }
 
 
-async def get_withdrawal(withdrawal_id: int) -> tuple | None:
+async def get_worker_stats(worker_id: int) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, user_id, amount, details, status FROM withdrawals WHERE id = ?", (withdrawal_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM orders WHERE worker_id = ? AND status = 'accepted'",
+            (worker_id,)
+        )
+        total_accepted = (await cursor.fetchone())[0]
+
+        cursor = await db.execute(
+            """SELECT COUNT(*) FROM orders WHERE worker_id = ? AND status = 'accepted'
+                AND date(created_at) = date('now')""",
+            (worker_id,)
+        )
+        today = (await cursor.fetchone())[0]
+
+        return {
+            "total_accepted": total_accepted,
+            "today": today,
+        }
