@@ -1615,3 +1615,77 @@ async def get_order_log_by_id(log_id: int):
                 (log_id,)
             )
             return await cursor.fetchone()
+
+
+async def cancel_order(order_id: int):
+    """Cancel order by admin — sets status to rejected and frees it up"""
+    if USE_POSTGRES:
+        await _execute(
+            """UPDATE orders SET status = 'rejected', updated_at = CURRENT_TIMESTAMP
+                WHERE order_id = $1""",
+            order_id
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """UPDATE orders SET status = 'rejected', updated_at = CURRENT_TIMESTAMP
+                    WHERE order_id = ?""",
+                (order_id,)
+            )
+            await db.commit()
+
+
+async def cleanup_old_orders(hours: int = 24):
+    """Auto-cancel orders that have been waiting/active for more than N hours"""
+    if USE_POSTGRES:
+        # Get old orders before updating
+        rows = await _fetchall(
+            """SELECT order_id, user_id, worker_id, status FROM orders
+                WHERE status IN ('waiting', 'active')
+                AND created_at < CURRENT_TIMESTAMP - INTERVAL '%s hours'""" % hours
+        )
+        if rows:
+            await _execute(
+                """UPDATE orders SET status = 'rejected', updated_at = CURRENT_TIMESTAMP
+                    WHERE status IN ('waiting', 'active')
+                    AND created_at < CURRENT_TIMESTAMP - INTERVAL '%s hours'""" % hours
+            )
+        return rows
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                """SELECT order_id, user_id, worker_id, status FROM orders
+                    WHERE status IN ('waiting', 'active')
+                    AND created_at < datetime('now', '-%d hours')""" % hours
+            )
+            rows = await cursor.fetchall()
+            if rows:
+                await db.execute(
+                    """UPDATE orders SET status = 'rejected', updated_at = CURRENT_TIMESTAMP
+                        WHERE status IN ('waiting', 'active')
+                        AND created_at < datetime('now', '-%d hours')""" % hours
+                )
+                await db.commit()
+            return rows
+
+
+async def get_old_orders(hours: int = 24) -> list:
+    """Get orders that will be auto-cleaned soon (for admin preview)"""
+    if USE_POSTGRES:
+        return await _fetchall(
+            """SELECT order_id, user_id, service, number, status, created_at
+                FROM orders
+                WHERE status IN ('waiting', 'active')
+                AND created_at < CURRENT_TIMESTAMP - INTERVAL '%s hours'
+                ORDER BY created_at ASC""" % hours
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                """SELECT order_id, user_id, service, number, status, created_at
+                    FROM orders
+                    WHERE status IN ('waiting', 'active')
+                    AND created_at < datetime('now', '-%d hours')
+                    ORDER BY created_at ASC""" % hours
+            )
+            return await cursor.fetchall()

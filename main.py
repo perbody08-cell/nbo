@@ -1006,6 +1006,40 @@ async def auto_cancel_timer(order_id: int, user_id: int, worker_id: int):
             pass
 
 
+async def periodic_cleanup_task():
+    """Background task: auto-cancel orders older than 24 hours every 30 minutes"""
+    while True:
+        await asyncio.sleep(1800)  # 30 minutes
+        try:
+            from db import cleanup_old_orders, log_order_completed
+            rows = await cleanup_old_orders(hours=24)
+            if rows:
+                for oid, uid, wid, status in rows:
+                    await log_order_completed(oid, 'rejected')
+                    try:
+                        await bot.send_message(
+                            uid,
+                            f"{Style.CROSS} <b>Заявка #{oid} автоматически отменена</b>\n\n"
+                            f"{Style.INFO} Истекло 24 часа. Создайте новую заявку.",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
+                    if wid:
+                        try:
+                            await bot.send_message(
+                                wid,
+                                f"{Style.CROSS} <b>Заявка #{oid} отменена системой</b>\n"
+                                f"{Style.INFO} Истекло 24 часа.",
+                                parse_mode="HTML",
+                            )
+                        except Exception:
+                            pass
+                print(f"[AUTO-CLEANUP] Cancelled {len(rows)} old orders")
+        except Exception as e:
+            print(f"[AUTO-CLEANUP] Error: {e}")
+
+
 @dp.callback_query(F.data.startswith("accept_"))
 async def accept_handler(callback: CallbackQuery):
     if not await is_worker(callback.from_user.id):
@@ -1137,6 +1171,9 @@ async def reject_handler(callback: CallbackQuery):
 
 async def main():
     await init_db(seed_worker_ids=WORKERS)
+
+    # Start background auto-cleanup task
+    asyncio.create_task(periodic_cleanup_task())
 
     port = int(os.environ.get("PORT", 8080))
 

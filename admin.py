@@ -49,6 +49,10 @@ from db import (
     get_order_logs,
     get_order_log_stats,
     get_order_log_by_id,
+    cancel_order,
+    cleanup_old_orders,
+    get_old_orders,
+    log_order_completed,
 )
 
 router = Router()
@@ -132,6 +136,7 @@ def main_panel_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=f"{Style.BALANCE} Баланс скупов", callback_data="admin_worker_balance")],
             [InlineKeyboardButton(text=f"{Style.WITHDRAW} Заявки на выплаты", callback_data="admin_withdrawals")],
             [InlineKeyboardButton(text=f"{Style.DOC} Логи заявок", callback_data="admin_logs")],
+            [InlineKeyboardButton(text=f"{Style.REMOVE} Очистка старых заявок", callback_data="admin_cleanup")],
         ]
     )
 
@@ -266,6 +271,54 @@ async def worker_info(callback: CallbackQuery):
            f"{Style.SERVICES} Сервисы: <code>{services_str}</code>"
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
+
+
+@router.callback_query(F.data.startswith("logcancel_"))
+async def log_cancel_handler(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    try:
+        order_id = int(callback.data.split("_", 1)[1])
+        order = await get_order(order_id)
+        if not order:
+            await callback.answer(f"{Style.CROSS} Заявка не найдена")
+            return
+        if order[5] not in ('waiting', 'active'):
+            await callback.answer(f"{Style.WARNING} Заявка уже завершена")
+            return
+
+        await cancel_order(order_id)
+        await log_order_completed(order_id, 'rejected')
+
+        # Notify user
+        user_id = order[1]
+        try:
+            await bot.send_message(
+                user_id,
+                f"{Style.CROSS} <b>Заявка #{order_id} отменена администратором</b>\n\n"
+                f"{Style.INFO} Обратитесь в поддержку для уточнения.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+        # Notify worker if assigned
+        worker_id = order[6]
+        if worker_id:
+            try:
+                await bot.send_message(
+                    worker_id,
+                    f"{Style.CROSS} <b>Заявка #{order_id} отменена администратором</b>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+        await callback.answer(f"{Style.CHECK} Заявка #{order_id} отменена")
+        # Refresh log detail
+        await log_detail(callback, state)
+    except Exception as e:
+        await callback.answer(f"{Style.CROSS} Ошибка: {str(e)[:100]}", show_alert=True)
 
 @router.callback_query(F.data.startswith("wprices_"))
 async def worker_prices_info(callback: CallbackQuery):
@@ -1007,6 +1060,100 @@ async def remove_all_services_confirm(callback: CallbackQuery, state: FSMContext
 
 
 
+
+
+@router.callback_query(F.data == "admin_cleanup")
+async def show_cleanup(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    try:
+        old_orders = await get_old_orders(hours=24)
+        count = len(old_orders)
+
+        lines = [
+            f"{Style.REMOVE} <b>Очистка старых заявок</b>",
+            f"",
+            f"{Style.INFO} Заявки висят более 24 часов автоматически отменяются.",
+            f"",
+            f"{Style.WARNING} Сейчас найдено: <b>{count}</b> старых заявок",
+            f"",
+        ]
+
+        if old_orders:
+            lines.append(f"{Style.DOC} <b>Список:</b>")
+            for oid, uid, svc, num, status, created in old_orders[:10]:
+                user_label = await get_user_display_name(uid)
+                status_icon = Style.CLOCK if status == 'waiting' else Style.REFRESH
+                lines.append(f"  #{oid} | {svc} | {user_label} | {status_icon}")
+            if len(old_orders) > 10:
+                lines.append(f"  ... и ещё {len(old_orders) - 10}")
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"{Style.DANGER} Отменить {count} заявок" if count else f"{Style.CHECK} Нечего очищать",
+                callback_data="admin_cleanup_confirm" if count else "admin_panel"
+            )],
+            [InlineKeyboardButton(text=f"{Style.REFRESH} Обновить", callback_data="admin_cleanup")],
+            [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")],
+        ])
+
+        await callback.message.edit_text(
+            "\n".join(lines),
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"{Style.CROSS} Ошибка: {str(e)[:100]}", show_alert=True)
+
+
+@router.callback_query(F.data == "admin_cleanup_confirm")
+async def confirm_cleanup(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    try:
+        rows = await cleanup_old_orders(hours=24)
+        count = len(rows)
+
+        # Log and notify users/workers
+        for oid, uid, wid, status in rows:
+            await log_order_completed(oid, 'rejected')
+            try:
+                await bot.send_message(
+                    uid,
+                    f"{Style.CROSS} <b>Заявка #{oid} автоматически отменена</b>\n\n"
+                    f"{Style.INFO} Истекло время (24 часа). Создайте новую заявку.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+            if wid:
+                try:
+                    await bot.send_message(
+                        wid,
+                        f"{Style.CROSS} <b>Заявка #{oid} отменена системой</b>\n"
+                        f"{Style.INFO} Истекло 24 часа.",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.REFRESH} Обновить", callback_data="admin_cleanup")],
+            [InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")],
+        ])
+
+        await callback.message.edit_text(
+            f"{Style.CHECK} <b>Очистка завершена</b>\n\n"
+            f"{Style.REMOVE} Отменено заявок: <b>{count}</b>",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        await callback.answer(f"{Style.CHECK} Отменено {count} заявок")
+    except Exception as e:
+        await callback.answer(f"{Style.CROSS} Ошибка: {str(e)[:100]}", show_alert=True)
+
 @router.callback_query(F.data == "admin_logs")
 async def show_logs(callback: CallbackQuery, state: FSMContext):
     if not admin_only(callback.from_user.id):
@@ -1104,6 +1251,7 @@ async def log_detail(callback: CallbackQuery, state: FSMContext):
         )
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.CROSS} Отменить заявку", callback_data=f"logcancel_{order_id}")],
             [InlineKeyboardButton(text=f"{Style.BACK} Назад к списку", callback_data="admin_logs")],
             [InlineKeyboardButton(text=f"{Style.HOME} В панель", callback_data="admin_panel")],
         ])
