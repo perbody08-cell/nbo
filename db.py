@@ -365,6 +365,26 @@ async def init_db(seed_worker_ids=None):
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # Logs table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS order_logs (
+                    log_id SERIAL PRIMARY KEY,
+                    order_id INTEGER NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    username TEXT,
+                    service TEXT NOT NULL,
+                    number TEXT NOT NULL,
+                    code TEXT,
+                    status TEXT DEFAULT 'waiting',
+                    worker_id BIGINT,
+                    worker_username TEXT,
+                    price REAL DEFAULT 0,
+                    worker_price REAL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    action TEXT DEFAULT 'created'
+                )
+            """)
 
             # Seed default services if none exist
             count = await conn.fetchval("SELECT COUNT(*) FROM services")
@@ -451,6 +471,26 @@ async def init_db(seed_worker_ids=None):
                     details TEXT NOT NULL,
                     status TEXT DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            # Logs table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS order_logs (
+                    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    username TEXT,
+                    service TEXT NOT NULL,
+                    number TEXT NOT NULL,
+                    code TEXT,
+                    status TEXT DEFAULT 'waiting',
+                    worker_id INTEGER,
+                    worker_username TEXT,
+                    price REAL DEFAULT 0,
+                    worker_price REAL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    action TEXT DEFAULT 'created'
                 )
             """)
 
@@ -1398,3 +1438,180 @@ async def get_user_display_name(user_id: int, username: str = None, first_name: 
         return f"@{db_username}"
 
     return f"ID: {user_id}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ORDER LOGS — Логирование всех заявок
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def log_order_created(order_id: int, user_id: int, username: str, service: str, number: str, price: float = 0):
+    """Log when order is created"""
+    if USE_POSTGRES:
+        await _execute(
+            """INSERT INTO order_logs (order_id, user_id, username, service, number, price, status, action)
+                VALUES ($1, $2, $3, $4, $5, $6, 'waiting', 'created')
+                ON CONFLICT DO NOTHING""",
+            order_id, user_id, username, service, number, price
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT OR IGNORE INTO order_logs (order_id, user_id, username, service, number, price, status, action)
+                    VALUES (?, ?, ?, ?, ?, ?, 'waiting', 'created')""",
+                (order_id, user_id, username, service, number, price)
+            )
+            await db.commit()
+
+
+async def log_order_taken(order_id: int, worker_id: int, worker_username: str, worker_price: float = 0):
+    """Log when worker takes order"""
+    if USE_POSTGRES:
+        await _execute(
+            """UPDATE order_logs SET worker_id = $1, worker_username = $2, worker_price = $3,
+                status = 'active', action = 'taken' WHERE order_id = $4""",
+            worker_id, worker_username, worker_price, order_id
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """UPDATE order_logs SET worker_id = ?, worker_username = ?, worker_price = ?,
+                    status = 'active', action = 'taken' WHERE order_id = ?""",
+                (worker_id, worker_username, worker_price, order_id)
+            )
+            await db.commit()
+
+
+async def log_order_completed(order_id: int, status: str, code: str = None):
+    """Log when order is accepted or rejected"""
+    if USE_POSTGRES:
+        await _execute(
+            """UPDATE order_logs SET status = $1, code = COALESCE($2, code),
+                completed_at = CURRENT_TIMESTAMP, action = $3 WHERE order_id = $4""",
+            status, code, status, order_id
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """UPDATE order_logs SET status = ?, code = COALESCE(?, code),
+                    completed_at = CURRENT_TIMESTAMP, action = ? WHERE order_id = ?""",
+                (status, code, status, order_id)
+            )
+            await db.commit()
+
+
+async def get_order_logs(days: int = 5, limit: int = 100, offset: int = 0) -> list:
+    """Get order logs for last N days"""
+    if USE_POSTGRES:
+        return await _fetchall(
+            """SELECT log_id, order_id, user_id, username, service, number, code, status,
+                worker_id, worker_username, price, worker_price, created_at, completed_at
+                FROM order_logs
+                WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '%s days'
+                ORDER BY created_at DESC
+                LIMIT $1 OFFSET $2""" % days,
+            limit, offset
+        )
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                """SELECT log_id, order_id, user_id, username, service, number, code, status,
+                    worker_id, worker_username, price, worker_price, created_at, completed_at
+                    FROM order_logs
+                    WHERE created_at >= datetime('now', '-%d days')
+                    ORDER BY created_at DESC
+                    LIMIT ? OFFSET ?""" % days,
+                (limit, offset)
+            )
+            return await cursor.fetchall()
+
+
+async def get_order_log_stats(days: int = 5) -> dict:
+    """Get statistics for last N days"""
+    if USE_POSTGRES:
+        total = await _fetchone(
+            "SELECT COUNT(*) FROM order_logs WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '%s days'" % days
+        )
+        accepted = await _fetchone(
+            "SELECT COUNT(*) FROM order_logs WHERE status = 'accepted' AND created_at >= CURRENT_TIMESTAMP - INTERVAL '%s days'" % days
+        )
+        rejected = await _fetchone(
+            "SELECT COUNT(*) FROM order_logs WHERE status = 'rejected' AND created_at >= CURRENT_TIMESTAMP - INTERVAL '%s days'" % days
+        )
+        active = await _fetchone(
+            "SELECT COUNT(*) FROM order_logs WHERE status = 'active' AND created_at >= CURRENT_TIMESTAMP - INTERVAL '%s days'" % days
+        )
+        waiting = await _fetchone(
+            "SELECT COUNT(*) FROM order_logs WHERE status = 'waiting' AND created_at >= CURRENT_TIMESTAMP - INTERVAL '%s days'" % days
+        )
+        total_bonus = await _fetchone(
+            "SELECT COALESCE(SUM(price), 0) FROM order_logs WHERE status = 'accepted' AND created_at >= CURRENT_TIMESTAMP - INTERVAL '%s days'" % days
+        )
+        return {
+            "total": total[0] if total else 0,
+            "accepted": accepted[0] if accepted else 0,
+            "rejected": rejected[0] if rejected else 0,
+            "active": active[0] if active else 0,
+            "waiting": waiting[0] if waiting else 0,
+            "total_bonus": float(total_bonus[0]) if total_bonus else 0,
+        }
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM order_logs WHERE created_at >= datetime('now', '-%d days')" % days
+            )
+            total = (await cursor.fetchone())[0]
+
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM order_logs WHERE status = 'accepted' AND created_at >= datetime('now', '-%d days')" % days
+            )
+            accepted = (await cursor.fetchone())[0]
+
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM order_logs WHERE status = 'rejected' AND created_at >= datetime('now', '-%d days')" % days
+            )
+            rejected = (await cursor.fetchone())[0]
+
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM order_logs WHERE status = 'active' AND created_at >= datetime('now', '-%d days')" % days
+            )
+            active = (await cursor.fetchone())[0]
+
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM order_logs WHERE status = 'waiting' AND created_at >= datetime('now', '-%d days')" % days
+            )
+            waiting = (await cursor.fetchone())[0]
+
+            cursor = await db.execute(
+                "SELECT COALESCE(SUM(price), 0) FROM order_logs WHERE status = 'accepted' AND created_at >= datetime('now', '-%d days')" % days
+            )
+            total_bonus = float((await cursor.fetchone())[0])
+
+            return {
+                "total": total,
+                "accepted": accepted,
+                "rejected": rejected,
+                "active": active,
+                "waiting": waiting,
+                "total_bonus": total_bonus,
+            }
+
+
+async def get_order_log_by_id(log_id: int):
+    """Get single log entry by log_id"""
+    if USE_POSTGRES:
+        row = await _fetchone(
+            """SELECT log_id, order_id, user_id, username, service, number, code, status,
+                worker_id, worker_username, price, worker_price, created_at, completed_at
+                FROM order_logs WHERE log_id = $1""",
+            log_id
+        )
+        return _row_to_tuple(row)
+    else:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                """SELECT log_id, order_id, user_id, username, service, number, code, status,
+                    worker_id, worker_username, price, worker_price, created_at, completed_at
+                    FROM order_logs WHERE log_id = ?""",
+                (log_id,)
+            )
+            return await cursor.fetchone()

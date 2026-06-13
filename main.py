@@ -55,6 +55,9 @@ from db import (
     get_available_orders,
     get_user_stats,
     get_worker_stats,
+    log_order_created,
+    log_order_taken,
+    log_order_completed,
 )
 import admin as admin_module
 
@@ -841,6 +844,15 @@ async def take_order_handler(callback: CallbackQuery):
 
     await take_order(order_id, worker_id)
 
+    # Log order taken
+    worker_label = await get_user_display_name(
+        worker_id,
+        callback.from_user.username,
+        callback.from_user.first_name,
+        callback.from_user.last_name
+    )
+    await log_order_taken(order_id, worker_id, worker_label, await get_worker_price(worker_id, service))
+
     code_request = await bot.send_message(
         order[1],
         f"{Style.SUCCESS} <b>Ваш номер взят в работу!</b>\n\n"
@@ -973,6 +985,7 @@ async def auto_cancel_timer(order_id: int, user_id: int, worker_id: int):
     order = await get_order(order_id)
     if order and order[5] == "active":
         await reject_order(order_id)
+        await log_order_completed(order_id, 'rejected')
         try:
             await bot.send_message(
                 user_id,
@@ -1010,6 +1023,7 @@ async def accept_handler(callback: CallbackQuery):
     service = order[2]
 
     await accept_order(order_id)
+    await log_order_completed(order_id, 'accepted', order[4])
     await increment_user_limit(user_id, 3)
 
     # Ensure user exists in database before adding balance
@@ -1085,6 +1099,7 @@ async def reject_handler(callback: CallbackQuery):
 
     if reject_count >= 2:
         await reject_order(order_id)
+        await log_order_completed(order_id, 'rejected')
         await bot.send_message(
             user_id,
             f"{Style.CROSS} <b>Заявка отменена</b>\n\n"

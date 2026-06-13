@@ -46,6 +46,9 @@ from db import (
     mark_withdrawal_paid,
     get_withdrawal,
     remove_all_services,
+    get_order_logs,
+    get_order_log_stats,
+    get_order_log_by_id,
 )
 
 router = Router()
@@ -128,6 +131,7 @@ def main_panel_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=f"{Style.PRICE} Цены скупов", callback_data="admin_worker_prices")],
             [InlineKeyboardButton(text=f"{Style.BALANCE} Баланс скупов", callback_data="admin_worker_balance")],
             [InlineKeyboardButton(text=f"{Style.WITHDRAW} Заявки на выплаты", callback_data="admin_withdrawals")],
+            [InlineKeyboardButton(text=f"{Style.DOC} Логи заявок", callback_data="admin_logs")],
         ]
     )
 
@@ -1001,6 +1005,113 @@ async def remove_all_services_confirm(callback: CallbackQuery, state: FSMContext
     await callback.answer()
 
 
+
+
+@router.callback_query(F.data == "admin_logs")
+async def show_logs(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    await state.clear()
+    try:
+        stats = await get_order_log_stats(days=5)
+        rows = await get_order_logs(days=5, limit=20)
+
+        lines = [
+            f"{Style.DOC} <b>Логи заявок (последние 5 дней)</b>",
+            f"",
+            f"{Style.STATS} <b>Статистика:</b>",
+            f"  {Style.ORDER} Всего: <b>{stats['total']}</b>",
+            f"  {Style.SUCCESS} Принято: <b>{stats['accepted']}</b>",
+            f"  {Style.DANGER} Отклонено: <b>{stats['rejected']}</b>",
+            f"  {Style.REFRESH} В работе: <b>{stats['active']}</b>",
+            f"  {Style.CLOCK} Ожидает: <b>{stats['waiting']}</b>",
+            f"  {Style.MONEY} Бонусов выдано: <code>{stats['total_bonus']:.2f} $</code>",
+            f"",
+        ]
+
+        kb_rows = []
+        if rows:
+            lines.append(f"{Style.DOC} <b>Последние заявки:</b>")
+            for row in rows:
+                log_id, order_id, user_id, username, service, number, code, status, worker_id, worker_username, price, worker_price, created_at, completed_at = row
+                status_icon = {
+                    'accepted': Style.SUCCESS,
+                    'rejected': Style.DANGER,
+                    'active': Style.REFRESH,
+                    'waiting': Style.CLOCK,
+                }.get(status, Style.INFO)
+                user_short = (username[:15] + '...') if username and len(username) > 15 else (username or f"ID:{user_id}")
+                lines.append(f"  #{order_id} | {service} | {user_short} | {status_icon}")
+                kb_rows.append([InlineKeyboardButton(
+                    text=f"#{order_id} | {service} | {status_icon}",
+                    callback_data=f"logdtl_{log_id}"
+                )])
+        else:
+            lines.append(f"{Style.INFO} Заявок за последние 5 дней не найдено.")
+
+        kb_rows.append([InlineKeyboardButton(text=f"{Style.REFRESH} Обновить", callback_data="admin_logs")])
+        kb_rows.append([InlineKeyboardButton(text=f"{Style.BACK} Назад", callback_data="admin_panel")])
+
+        await callback.message.edit_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"{Style.CROSS} Ошибка: {str(e)[:100]}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("logdtl_"))
+async def log_detail(callback: CallbackQuery, state: FSMContext):
+    if not admin_only(callback.from_user.id):
+        return
+    try:
+        log_id = int(callback.data.split("_", 1)[1])
+        row = await get_order_log_by_id(log_id)
+        if not row:
+            await callback.answer(f"{Style.CROSS} Запись не найдена")
+            return
+
+        log_id, order_id, user_id, username, service, number, code, status, worker_id, worker_username, price, worker_price, created_at, completed_at = row
+
+        status_labels = {
+            'accepted': f"{Style.SUCCESS} Принята",
+            'rejected': f"{Style.DANGER} Отклонена",
+            'active': f"{Style.REFRESH} В работе",
+            'waiting': f"{Style.CLOCK} Ожидает",
+        }
+        status_text = status_labels.get(status, status)
+
+        user_label = username or f"ID: {user_id}"
+        worker_label = worker_username or (f"ID: {worker_id}" if worker_id else "—")
+
+        created_str = str(created_at)[:19] if created_at else "—"
+        completed_str = str(completed_at)[:19] if completed_at else "—"
+
+        text = (
+            f"{Style.DOC} <b>Детали заявки #{order_id}</b>\n\n"
+            f"{Style.USER} <b>Пользователь:</b> <code>{user_label}</code>\n"
+            f"{Style.PHONE} <b>Сервис:</b> <code>{service}</code>\n"
+            f"{Style.CODE} <b>Номер:</b> <code>{number}</code>\n"
+            f"{Style.INFO} <b>Статус:</b> {status_text}\n"
+            f"{Style.MONEY} <b>Бонус:</b> <code>{price:.2f} $</code>\n\n"
+            f"{Style.WORKER} <b>Скуп:</b> <code>{worker_label}</code>\n"
+            f"{Style.MONEY} <b>Цена скупа:</b> <code>{worker_price:.2f} $</code>\n"
+            f"{Style.CODE} <b>Код:</b> <code>{code or '—'}</code>\n\n"
+            f"{Style.CLOCK} <b>Создана:</b> <code>{created_str}</code>\n"
+            f"{Style.CLOCK} <b>Завершена:</b> <code>{completed_str}</code>"
+        )
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{Style.BACK} Назад к списку", callback_data="admin_logs")],
+            [InlineKeyboardButton(text=f"{Style.HOME} В панель", callback_data="admin_panel")],
+        ])
+
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"{Style.CROSS} Ошибка: {str(e)[:100]}", show_alert=True)
 @router.message(Command("ai"))
 async def ai_start(message: Message, state: FSMContext):
     if not admin_only(message.from_user.id):
