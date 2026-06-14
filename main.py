@@ -764,6 +764,19 @@ async def enter_number(message: Message, state: FSMContext):
     created = []
     for number in numbers_to_process:
         order_id = await create_order(message.from_user.id, service, number)
+        
+        # Логирование создания заявки
+        username = message.from_user.username
+        price = await get_service_price(service)
+        await log_order_created(
+            order_id, 
+            message.from_user.id, 
+            username, 
+            service, 
+            number, 
+            price
+        )
+        
         queue_pos = await get_queue_position(order_id, service)
         bonus = await get_service_price(service)
         queue_total = await get_queue_count(service)
@@ -786,8 +799,9 @@ async def enter_number(message: Message, state: FSMContext):
                         parse_mode="HTML",
                     )
                     notified += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Логировать ошибку отправки уведомления скупу
+                    print(f"[ERROR] Failed to notify worker {worker_id}: {e}")
 
         created.append((order_id, number, notified))
 
@@ -844,14 +858,13 @@ async def take_order_handler(callback: CallbackQuery):
 
     await take_order(order_id, worker_id)
 
-    # Log order taken
-    worker_label = await get_user_display_name(
-        worker_id,
-        callback.from_user.username,
-        callback.from_user.first_name,
-        callback.from_user.last_name
+    # Log order taken - исправлено: передаем username вместо label
+    await log_order_taken(
+        order_id, 
+        worker_id, 
+        callback.from_user.username,  # username вместо label
+        await get_worker_price(worker_id, service)
     )
-    await log_order_taken(order_id, worker_id, worker_label, await get_worker_price(worker_id, service))
 
     code_request = await bot.send_message(
         order[1],
@@ -1061,7 +1074,12 @@ async def accept_handler(callback: CallbackQuery):
     await increment_user_limit(user_id, 3)
 
     # Ensure user exists in database before adding balance
-    await upsert_user(user_id, None)
+    await upsert_user(
+        user_id, 
+        callback.from_user.username,
+        callback.from_user.first_name,
+        callback.from_user.last_name
+    )
 
     bonus = await get_service_price(service)
     worker_price = await get_worker_price(callback.from_user.id, service) or 0
